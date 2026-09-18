@@ -18,7 +18,7 @@
 └───────────────────────────────────────────────────────────────────────────────────────┘
                                         │
 ┌──────────────── src/transports/* (유일한 I/O 경계) ─────────────────────────────────┐
-│  fake (테스트) · telegram(TODO) · discord(TODO) · slack(TODO)                          │
+│  discord (구현) · fake (테스트) · telegram(TODO) · slack(TODO)                          │
 └───────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -68,7 +68,11 @@ interface Transport {
 | 전송 | maxMessageLength | lengthUnit | markdown | threads | edit |
 | --- | --- | --- | --- | --- | --- |
 | fake | 4000 | chars | markdown | false | false |
+| discord | 2000 | chars | markdown | false | true |
 | telegram | 4096 | bytes | html | false | true |
+| slack | 4000 | chars | mrkdwn | true | true |
+
+Discord는 스레드에서 `channel_id`가 스레드 자체의 id이므로 `conversationId`가 자동으로 분리된다. 별도 `threadId` 추적이 필요 없어 `threads: false`로 두었다(부모 채널과의 관계를 다루지 않는다는 뜻). `attachments: true`는 전송이 첨부를 **운반할 수 있다**는 뜻이며, 호스트가 그것을 모델에 전달할 수 있는지와는 별개다.
 | discord | 2000 | chars | markdown | true | true |
 | slack | 4000 | chars | mrkdwn | true | true |
 
@@ -92,6 +96,12 @@ interface Transport {
 | I10 | 설정 파일은 비밀값을 담을 수 없다(env 변수 이름만). | `config.test.ts` |
 | I11 | 툴 인자/출력은 원격으로 전송되지 않는다(툴 이름만). | `index.ts` 설계 + 리뷰 |
 | I12 | 신뢰 단위는 `transport:userId`다. 맨 userId로는 신뢰하지 않는다. | `bridge.test.ts` |
+| I13 | 호스트가 전달할 수 없는 첨부에 대해 프롬프트를 지어내지 않는다. | `router.test.ts`, `bridge.test.ts` |
+| I14 | 봇 자신과 다른 봇·웹훅의 메시지는 무시한다(무한 루프 방지). | `normalize.test.ts`, `discord/index.test.ts` |
+| I15 | 봇 자격증명당 프로세스는 하나다. 시작 실패 시 락을 남기지 않는다. | `lock.test.ts`, `discord/index.test.ts` |
+| I16 | 전송이 시작에 실패해도 세션은 죽지 않는다. 이유는 `doctor`에 노출된다. | `bridge.test.ts`, `index.test.ts` |
+| I17 | 신뢰·일시정지·브로드캐스트 대상은 세션별로 격리된다. | `file-store.test.ts`, `index.test.ts` |
+| I18 | `diagnose()`는 토큰을 포함하지 않는다. | `discord/index.test.ts`, `lock.test.ts` |
 
 ---
 
@@ -142,14 +152,14 @@ const decision = decidePairing({ ..., now: 10, random: digitSequence("987654") }
 
 새 어댑터는 다음을 모두 만족해야 머지 가능하다. (v1에서 `src/transports/transport-contract.test.ts`로 자동화한다)
 
-**계약**
+#### 계약
 - [ ] `id`가 소문자 단일 토큰이다
 - [ ] `capabilities`가 실제 플랫폼 한계와 일치한다 (상한을 실제보다 크게 잡으면 메시지가 잘린다)
 - [ ] `start()` 전에 `send()`를 호출하면 명확한 에러를 던진다
 - [ ] `stop()`을 두 번 호출해도 안전하다
 - [ ] `stop()` 이후 수신 핸들러가 더 이상 호출되지 않는다
 
-**Envelope 정규화**
+#### Envelope 정규화
 - [ ] 자기 자신이 보낸 메시지를 무시한다 (봇 루프 방지)
 - [ ] `isDirect`가 DM/채널을 정확히 구분한다
 - [ ] `addressed`가 멘션/답장을 반영한다
@@ -157,15 +167,20 @@ const decision = decidePairing({ ..., now: 10, random: digitSequence("987654") }
 - [ ] `timestamp`가 플랫폼 시간 기준으로 채워진다
 - [ ] 첨부는 `ref`만 넘기고 본문을 즉시 다운로드하지 않는다
 
-**전송**
+#### 전송
 - [ ] `OutboundMessage.editKey`가 있으면 새 메시지 대신 편집한다 (capability가 `edit: true`일 때)
 - [ ] `threadId`를 지원하면 반영하고, 아니면 무시한다 (에러 금지)
 
-**보안/운영**
+#### 보안/운영
 - [ ] 자격증명은 env 변수에서만 읽는다
 - [ ] 토큰/원문 payload를 로그에 남기지 않는다
 - [ ] 레이트리밋/재연결에 백오프가 있다
-- [ ] 단일 인스턴스 락을 존중한다 (폴링형 전송)
+- [ ] 단일 인스턴스 락을 존중한다 (폴링/게이트웨이형 전송). 시작 실패 시 락을 반드시 해제한다
+- [ ] 자기 자신과 다른 봇의 메시지를 무시한다 (`author.bot`, `webhook_id`)
+- [ ] 자격증명 검증을 먼저 한다. 잘못된 토큰은 소켓/폴링을 열기 전에 실패한다
+- [ ] `diagnose()`가 있고 토큰을 포함하지 않는다
+- [ ] `send()`가 시작 전이면 명확히 throw한다
+- [ ] 게이트웨이/폴링 연결에 READY 타임아웃이 있다 (무한 대기 금지)
 
 ---
 
@@ -210,6 +225,14 @@ const decision = decidePairing({ ..., now: 10, random: digitSequence("987654") }
   },
   "transports": {
     // 전송별 설정. 비밀값 금지, env 변수 이름만.
+    "discord": {
+      // 생략 가능. 기본값은 PI_DISCORD_TOKEN.
+      "tokenEnv": "PI_DISCORD_TOKEN",
+      // false면 토큰이 없어도 조용히 건너뜀. true면 설정 오류로 보고됨.
+      "enabled": true,
+      // 락 만료(ms). 다른 호스트의 락은 이 시간이 지나야 회수된다.
+      "lockStaleMs": 900000
+    },
     "telegram": { "tokenEnv": "PI_TELEGRAM_TOKEN" }
   }
 }
@@ -241,10 +264,13 @@ const decision = decidePairing({ ..., now: 10, random: digitSequence("987654") }
 | G1 | 프롬프트 인젝션 | 메신저로 들어온 텍스트가 로컬 파일을 읽어 밖으로 보내도록 지시할 수 있다. 도구 정책/승인 게이트가 필요 (v2) |
 | G2 | 맥락 병합의 정의 | 원격 턴을 로컬 TUI에 어떻게 "보이게" 할지. `pi.appendEntry` + `registerEntryRenderer` 후보 |
 | G3 | 다중 세션 | 단일 봇 + 다중 세션 라우팅은 브로커가 필요 (v2) |
-| G4 | 진행 상황 편집 | `editKey`로 같은 메시지를 갱신하는 UX. capability는 이미 있음 |
+| G4 | 진행 상황 편집 | 브리지가 `SendReceipt.editKey`를 보관해 `publish("progress", …)`를 편집으로 보내기. capability는 이미 있다 |
 | G5 | 리플레이 하네스 | 엔벨로프 record/replay로 회귀 테스트 |
-| G6 | 단일 인스턴스 락 | 폴링형 전송 필수. `proper-lockfile` 또는 `fs.open` 기반 자체 구현 |
-| G7 | 세션 복원 | `pi --continue` 시 신뢰 상태 복원 (`pi.appendEntry` 사용) |
+| G6 | ~~단일 인스턴스 락~~ | ✅ 완료 — `src/lock.ts`. O_EXCL 획득, 생존/만료 회수, 토큰 검증 해제 |
+| G7 | 세션 복원 | ✅ 완료 — `FileBridgeStore`가 세션 id로 스코프해 `pi --continue`에서 신뢰가 유지된다 |
+| G8 | 첨부(이미지) 전달 | `Transport.fetchAttachment(ref)` + `BridgeHost.acceptsAttachments`를 true로. 현재는 명시적 거부 |
+| G9 | 다이제스트 데이터 소스 | `branch`/`changes`/`todos`/`testSummary`가 아직 채워지지 않아 카드가 얇다 |
+| G10 | Slack 타이핑/리액션 | 플랫폼 제약. 어댑터별 fallback 필요 |
 
 ---
 

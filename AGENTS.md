@@ -122,9 +122,11 @@ PI_BOT_CONNECT_DEBUG=1 pi -e ./src/index.ts   # 어댑터 로그 활성화
 | --- | --- |
 | `PI_BOT_CONNECT_DEBUG` | `1`/`true`이면 어댑터 로그(console) 활성화 |
 | `PI_BOT_CONNECT_CONFIG` | 설정 파일 경로를 **강제**한다. 전역/프로젝트 탐색을 건너뛴다. 테스트·CI에서 개발자의 실제 설정에 의존하지 않기 위한 용도 |
-| `PI_TELEGRAM_TOKEN` (예정) | 전송 자격증명. **값은 설정 파일에 쓰지 않는다** |
+| `PI_BOT_CONNECT_STATE` | 상태 파일 경로를 **강제**한다. 락 디렉터리는 이 파일의 상위 디렉터리를 따른다 |
+| `PI_DISCORD_TOKEN` | Discord 봇 토큰. 설정의 `tokenEnv`로 이름 변경 가능. **값은 설정 파일에 쓰지 않는다** |
+| `PI_TELEGRAM_TOKEN` (예정) | Telegram 봇 토큰 |
 
-`src/index.test.ts`는 항상 `PI_BOT_CONNECT_CONFIG`로 임시 파일을 가리킨다. 테스트에서 `loadBridgeConfig`를 직접 쓰지 말고 이 방식을 따르라.
+`src/index.test.ts`는 항상 `PI_BOT_CONNECT_CONFIG`와 `PI_BOT_CONNECT_STATE`로 임시 파일을 가리킨다. 테스트에서 `loadBridgeConfig`를 직접 쓰지 말고 이 방식을 따르라. Discord 전송 테스트는 토큰 환경변수를 직접 지우고 복원한다 (`src/transports/index.test.ts` 참조).
 
 ---
 
@@ -137,22 +139,39 @@ src/
 ├── bridge.ts                오케스트레이션. 전송↔코어↔세션 연결 + 송신 파이프라인
 ├── bridge.test.ts           26 테스트 — 전 구간 시나리오 (FakeTransport + FakeHost)
 ├── config.ts                설정 파일 검증 (신뢰할 수 없는 입력)
-├── config.test.ts           18 테스트
+├── file-store.ts            상태 영속화(원자적 쓰기, chmod 600). 세션별 격리
+├── file-store.test.ts       22 테스트 (실제 임시 디렉터리 사용)
+├── lock.ts                  단일 인스턴스 락. O_EXCL + 생존/만료 회수 + 토큰 검증 해제
+├── lock.test.ts             17 테스트
 ├── core/                    ★ 완전 순수. 여기가 제품의 본체
 │   ├── types.ts             Envelope, Transport, BridgeConfig, Logger
 │   ├── router.ts            (envelope, state) → action[]. 모든 라우팅 결정
 │   ├── commands.ts          원격 명령 파싱 + 실행 (문자열 반환, I/O 없음)
 │   ├── pairing.ts           챌린지 생성/검증 + 렌더링 (코드 유출 방지)
+│   ├── notices.ts           브리지가 스스로 보내는 사용자용 문자열
 │   ├── chunk.ts             UTF-8 안전 청킹
 │   ├── markdown.ts          전송 flavor별 마크다운 변환
 │   ├── redact.ts            비밀값 리댁션
 │   ├── digest.ts            작업 다이제스트(공유 카드) 생성
 │   ├── message.ts           pi 메시지에서 표시 텍스트 추출
+│   ├── text.ts              멘션 제거, 접두사 매칭, 이스케이프
 │   └── logger.ts            JSON Lines 로거 + MemoryLogSink(테스트)
 └── transports/
-    ├── index.ts             전송 팩토리 레지스트리 (현재 비어 있음)
-    └── fake.ts              인메모리 전송. 테스트 + 봇 토큰 없는 개발용
+    ├── index.ts             전송 팩토리 레지스트리 (coverage 제외)
+    ├── index.test.ts        팩토리 배선 테스트
+    ├── fake.ts              인메모리 전송. 테스트 + 봇 토큰 없는 개발용
+    └── discord/
+        ├── normalize.ts     ★ 순수. Discord payload → Envelope
+        ├── normalize.test.ts
+        ├── gateway.ts       HELLO/IDENTIFY/RESUME/하트비트/재접속 상태머신
+        ├── gateway.test.ts  가짜 소켓 + 가짜 스케줄러
+        ├── rest.ts          fetch 4종 + 레이트리밋 재시도
+        ├── index.ts         전송 본체: 신원 확인 → 락 → 게이트웨이
+        ├── index.test.ts
+        └── doubles.ts       공유 테스트 더블 (coverage 제외)
 ```
+
+**Discord 전송이 참조 구현이다.** 새 전송을 추가할 때 구조를 그대로 따라라: 순수 정규화 모듈 + 주입 가능한 I/O + 얇은 조합.
 
 각 `core/*.ts`에는 같은 이름의 `.test.ts`가 있다. **새 모듈을 만들면 테스트도 같이 만든다.**
 
@@ -205,6 +224,20 @@ const host = new FakeHost();   // clock, rng, idle, prompts[], notifications[], 
 
 새 테스트는 이 두 헬퍼를 재사용한다. 실제 네트워크를 테스트에 넣지 않는다.
 
+Discord 계열은 `src/transports/discord/doubles.ts`를 쓴다:
+
+```ts
+const rest = new FakeRest();            // /users/@me, /gateway/bot, create/edit
+const sockets: FakeSocket[] = [];       // gateway가 연 소켓을 순서대로 수집
+const scheduler = new FakeScheduler();  // 하트비트/재접속 타이머를 수동으로 발화
+const transport = new DiscordTransport({ token, lockDir, logger, rest,
+  createSocket: socketFactory(sockets), scheduler });
+```
+
+**주의**: 전송 `start()`는 락 때문에 **실제 파일 I/O**를 한다. `setImmediate` 한 번으로 소켓을 기대하면 전체 스위트 실행 시 실패한다. `waitForSocket`처럼 **실시간 데드라인**으로 폴링하라 (`src/transports/discord/index.test.ts` 참조).
+
+스토어를 쓰는 테스트는 `afterEach`에서 **반드시 `flush()`** 하라. 쓰기가 뒤에서 일어나므로 임시 디렉터리 삭제와 경합한다 (`src/file-store.test.ts` 참조).
+
 ---
 
 ## 5. pi API 치트시트 (이 프로젝트가 실제로 쓰는 것만)
@@ -252,17 +285,23 @@ import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 `docs/architecture.md` §2(계약)와 §5(수용 체크리스트)를 먼저 읽는다.
 
 ```text
-1. src/transports/<name>.ts 작성 — implements Transport
+1. src/transports/<name>/ 디렉터리를 만든다 (Discord 구조를 따른다)
+   - normalize.ts: payload → Envelope. 순수. 네트워크/시계/토큰 없음
+   - gateway/폴링: I/O. 소켓과 타이머를 주입받는다
+   - rest.ts: HTTP. fetch를 주입받는다
+   - index.ts: 신원 확인 → 락 → 수신 → send(). 가능하면 diagnose()도
 2. src/transports/index.ts의 FACTORIES에 팩토리 등록
-   - create()는 미설정이면 null 반환, 설정이 잘못되면 throw
+   - 미설정이면 null 반환, `enabled: true`인데 자격증명이 없으면 throw
    - 자격증명은 env 변수에서 읽는다 (설정 파일에는 변수 이름만)
 3. 실제 payload를 fixture로 저장한다 (토큰 마스킹)
-4. 정규화 테스트 작성: isDirect, addressed, self-message 무시, 스레드 구분
-5. conformance 체크리스트를 항목별로 통과시킨다
-6. npm run check
+4. 정규화 테스트 작성: isDirect, addressed, 자기 메시지 무시, 다른 봇 무시, 스레드 구분
+5. conformance 체크리스트(docs/architecture.md §5)를 항목별로 통과시킨다
+6. npm run check — 그리고 **전체 스위트를 3회 이상 반복**해 타이밍 플레이크를 확인한다
 7. README에 설정 방법(env 변수, 플랫폼 앱 설정 절차)을 추가한다
 8. pi -e ./src/index.ts 로 수동 왕복 1회 확인
 ```
+
+계층 분리가 곧 테스트 가능성이다. Discord 전송은 다음을 주입받기 때문에 봇 토큰·네트워크 없이 전 구간이 검증된다: `rest`(REST API), `createSocket`(WebSocket), `scheduler`(타이머).
 
 **하지 말 것**:
 - 브리지나 코어에 전송별 분기 추가 (`if (transport === "telegram")`). 그건 capability로 표현해야 한다
@@ -276,11 +315,17 @@ import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 | 함정 | 증상 | 대응 |
 | --- | --- | --- |
 | 페어링 코드를 채팅으로 전송 | 인증이 무의미해짐 | 코드는 `pairingCodeNotice`로 터미널에만. 테스트 `I1` |
-| 폴링 전송을 두 프로세스가 시작 | `getUpdates` 충돌, 메시지 유실 | 단일 인스턴스 락 필수 (G6) |
+| 같은 봇으로 두 프로세스가 연결 (Discord) | 나중 게이트웨이가 앞 것을 끊어 메시지가 오락가락 | 봇 ID 기준 단일 인스턴스 락 (`lock.ts`) |
+| **Message Content Intent 미활성** | 봇이 메시지를 받지만 `content`가 빈 문자열 | Developer Portal → Bot → Privileged Gateway Intents. `diagnose()`와 README에 명시 |
+| 자기/다른 봇 메시지를 그대로 주입 | 무한 루프. 두 봇이 서로에게 응답 | `normalize`에서 `author.bot`/`webhook_id`/자기 id를 skip. `last skip`을 `diagnose()`에 노출 |
 | 확장 팩토리에서 소켓/타이머 시작 | pi 시작이 멈추거나 좀비 프로세스 | `session_start`로 미룬다 |
+| 전송 시작 중 락을 남기고 실패 | 이후 모든 세션이 "다른 프로세스가 락을 보유"로 막힘 | `start()` 실패 경로에서 반드시 `lock.release()`. 테스트로 고정됨 |
+| 게이트웨이 READY를 무한 대기 | 시작이 영원히 매달림 | `readyTimeoutMs`(기본 20초) 후 fail |
 | `agent_end`로 완료 알림 | 재시도/자동 압축 중에 알림이 나감 | `agent_settled` 사용 |
 | 스트리밍 중 `deliverAs` 없이 주입 | throw | `isIdle()` 확인 + 레이스 가드 (`index.ts`) |
 | 툴 인자를 진행 상황에 포함 | 토큰/파일 내용 유출 | 툴 이름만 전송 |
+| 이미지가 없는데 "이미지를 봐라"고 주입 | 모델이 존재하지 않는 첨부를 설명하려 함 | 호스트가 `acceptsAttachments: false`면 라우터가 `unsupported`로 거부 |
+| 테스트에서 `setImmediate` 한 번으로 비동기 완료를 기대 | 단독 실행은 통과, 전체 스위트는 실패 (libuv 스레드풀 경합) | 실시간 데드라인 폴링. §4.4 참조 |
 | 텍스트 검색으로 코드 수정 | 무관한 위치 오수정 | 편집은 정확한 문자열 일치, 검색은 시맨틱 도구 사용 |
 | `exactOptionalPropertyTypes` 없이 선택 속성 | `{ threadId: undefined }`가 전송에 새어 들어감 | 스프레드로 조건부 구성: `...(x === undefined ? {} : { x })` |
 
@@ -334,23 +379,28 @@ docs(agents): document the transport conformance checklist
 | 코어 (라우팅/페어링/리댁션/청킹/마크다운/다이제스트) | ✅ 완료, 테스트로 고정 |
 | 브리지 오케스트레이션 | ✅ 완료 |
 | 설정 검증 | ✅ 완료 |
-| pi 어댑터 셸 + 로컬 `/connect` 명령 | ✅ 완료 (배선 테스트 22개) |
-| 테스트 | 186 통과 / typecheck 0 에러 |
-| Telegram 전송 | ❌ 미구현 (v1) |
-| Discord / Slack 전송 | ❌ 미구현 (v2/v3) |
-| 단일 인스턴스 락 | ❌ 미구현 (v1, G6) |
-| 맥락 병합 | ❌ 설계 미확정 (G2) |
+| pi 어댑터 셸 + 로컬 `/connect` 명령 | ✅ 완료 (배선 테스트 29개) |
+| 상태 영속화 (세션별 격리) | ✅ 완료 |
+| 단일 인스턴스 락 | ✅ 완료 |
+| `/connect doctor` | ✅ 완료 |
+| **Discord 전송** | ✅ 완료 (봇 SDK 없이 게이트웨이 직접 구현) |
+| 테스트 | 312 통과 / typecheck 0 에러 / 4회 연속 안정 |
+| Telegram · Slack 전송 | ❌ 미구현 |
+| 첨부(이미지) 전달 | ❌ 미구현 — 현재는 명시적으로 거부 |
+| 진행 상황 edit-in-place | ◐ `capabilities.edit`/`editKey`는 있으나 브리지가 아직 사용하지 않음 |
+| 다이제스트 데이터 소스 (git diff/TODO/테스트) | ❌ 미구현 — 카드가 얇음 |
 | 프롬프트 인젝션 방어 | ❌ 미구현 (G1) |
 
 전체 로드맵과 미해결 과제: `docs/architecture.md` §9, `docs/feasibility.md` §6.
 
 ### 다음에 할 일 (권장 순서)
 
-1. **Telegram 어댑터 + 단일 인스턴스 락** — 롱폴링, 4096 bytes, HTML. fixture 기반 정규화 테스트
-2. **핸드오프 명시화** — `/connect handoff` / `/connect release`, 그리고 터미널 복귀 시 맥락 병합 방식 확정(G2)
-3. **진행 상황 편집(edit-in-place)** — `capabilities.edit` + `editKey`
-4. **conformance 테스트 키트** — `src/transports/transport-contract.test.ts` (2번째 어댑터가 생기면 즉시)
-5. **리플레이 하네스** — 엔벨로프 record/replay (G5)
+1. **첨부(이미지) 전달** — `Transport.fetchAttachment(ref)` 추가 → `BridgeHost.acceptsAttachments`를 true로. 거부 메시지와 테스트가 이미 자리잡고 있다
+2. **진행 상황 edit-in-place** — 브리지가 `SendReceipt.editKey`를 보관해 `publish("progress", …)`를 편집으로 보내기
+3. **다이제스트 데이터 소스** — `pi.exec("git", …)`로 브랜치/변경 통계, 세션 엔트리에서 TODO
+4. **conformance 테스트 키트** — `src/transports/transport-contract.test.ts`. Telegram 착수 시점
+5. **Telegram 전송** — 롱폴링, 4096 bytes, HTML. `lock.ts` 재사용
+6. **프롬프트 인젝션 방어** (G1) — 채팅을 다른 사람과 공유하기 **전에** 필요
 
 ---
 
