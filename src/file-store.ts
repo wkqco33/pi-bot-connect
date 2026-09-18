@@ -1,32 +1,16 @@
 /**
  * Durable `BridgeStore` backed by a single JSON file.
  *
- * Why this exists: trust, pending challenges and broadcast targets used to live
- * only in memory, so every `/reload` or pi restart forced the user to pair again.
+ * Why: trust, pending challenges and broadcast targets used to live only in
+ * memory, so every `/reload` or pi restart forced the user to pair again.
  *
- * Layout (one file, per-session sub-objects):
+ * State is scoped per session id: pairing with one live session must not grant a
+ * chat broadcast rights on another. `pi --continue` keeps the same session id,
+ * which is why trust survives a restart. The file shape is documented in
+ * `docs/architecture.md` §7.
  *
- * ```jsonc
- * {
- *   "version": 1,
- *   "sessions": {
- *     "<sessionId>": {
- *       "updatedAt": 1699999999999,
- *       "trusted": { "discord:42": 1699999999999 },
- *       "pending": { "discord:chan-1": { "code": "123456", "expiresAt": 1, "attempts": 0 } },
- *       "paused": ["discord:chan-1"],
- *       "conversations": [{ "transport": "discord", "conversationId": "chan-1" }]
- *     }
- *   }
- * }
- * ```
- *
- * Sessions are isolated on purpose: pairing with one live session must not give
- * that chat broadcast rights on another. `pi --continue` keeps the same session
- * id, which is exactly why trust survives a restart.
- *
- * This module is I/O, so it lives outside `src/core/`. The *validation* of the
- * file contents is a pure function (`parseStoreSnapshot`) and is unit-tested.
+ * This module is I/O, so it lives outside `src/core/`. Validation of the file
+ * contents is pure (`parseStoreSnapshot`) and unit-tested.
  */
 
 import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";

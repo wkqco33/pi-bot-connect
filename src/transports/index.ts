@@ -1,19 +1,10 @@
 /**
  * Transport registry.
  *
- * Adding a messenger = adding a factory here that returns a `Transport`.
- * Nothing else in the codebase changes, and the new adapter inherits routing,
- * pairing, redaction, chunking and digest behaviour for free.
- *
- * Roadmap (see docs/architecture.md for the acceptance checklist per transport):
- *   - telegram  long polling, 4096 bytes, HTML flavor
- *   - slack     Socket Mode, 4000 chars, mrkdwn flavor
- *
- * Each transport must:
- *   1. never emit an `Envelope` field that is not in the contract
- *   2. set `isDirect` correctly (DMs vs channels) — addressing depends on it
- *   3. read credentials from environment variables, never from the config file
- *   4. pass the conformance checklist in docs/architecture.md §5
+ * Adding a messenger means adding a factory here that returns a `Transport`.
+ * Nothing else changes: the adapter inherits routing, pairing, redaction,
+ * chunking and digest behaviour for free, and must satisfy the conformance
+ * checklist in `docs/architecture.md` §5.
  */
 
 import type { Logger, Transport } from "../core/types.js";

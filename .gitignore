@@ -9,3 +9,6 @@ coverage/
 *.local.json
 .env
 .env.*
+
+# npm pack output
+*.tgz

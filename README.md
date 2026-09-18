@@ -12,6 +12,50 @@
 
 ---
 
+## 설치
+
+```bash
+pi install npm:pi-bot-connect
+```
+
+저장소에서 직접 설치하거나 일회성으로 실행할 수도 있다:
+
+```bash
+pi install /path/to/pi-bot-connect
+pi install git:github.com/<you>/pi-bot-connect@v0.1.0
+pi -e ./src/index.ts          # 현재 디렉터리의 소스로 한 번만 실행
+```
+
+설치 후 pi를 재시작하거나 `/reload`를 실행한 뒤, 아래 Discord 설정을 진행한다.
+
+> **0.x 버전이다.** 설정 스키마·원격 명령 집합·`Transport` 계약이 메이저 버전 없이
+> 바뀔 수 있다. 변경 내역은 [CHANGELOG.md](CHANGELOG.md).
+>
+> **실제 Discord API와의 왕복은 아직 검증되지 않았다.** 게이트웨이 상태머신·정규화·
+> 첨부 다운로드·락은 전부 가짜 소켓과 가짜 fetch로 테스트되어 있고(386개), 첫 실사용이
+> 진짜 통합 테스트다. 문제가 생기면 `/connect doctor`가 어느 단계인지 알려준다.
+
+---
+
+## 지원 범위
+
+| 항목 | 범위 |
+| --- | --- |
+| pi | `>=0.85.0` (peer dependency) |
+| Node.js | `>=22.19.0` — pi의 요구사항이며 전역 `WebSocket`/`fetch`를 쓴다 |
+| 전송 | Discord만. Telegram·Slack은 같은 코어 위에 추가 예정 |
+| 모델 입력 | 텍스트 + 이미지 (PNG/JPEG/GIF/WebP, 최대 4장, 장당 8 MiB) |
+| 이미지가 아닌 첨부 | 거부한다 (조용히 버리지 않음) |
+| 다중 세션 | 세션당 1전송. 단일 봇 + 다중 세션 라우팅은 미구현 |
+| 암호화 | 없음 — 플랫폼 전송 계층에 의존 |
+| 런타임 의존성 | 0개 |
+
+CI는 Node 22.19와 24에서 `npm run check`를 실행한다
+(`.github/workflows/ci.yml`). 릴리스는 태그를 푸시하면 CI에서
+`npm publish --provenance`로만 수행된다.
+
+---
+
 ## Discord 설정
 
 ### 1. 봇 만들기
@@ -203,4 +247,4 @@ PI_BOT_CONNECT_DEBUG=1 pi -e ./src/index.ts
 
 ## 라이선스
 
-MIT
+MIT — [LICENSE](LICENSE) 참조.

@@ -139,6 +139,8 @@ src/
 ├── bridge.ts                오케스트레이션. 전송↔코어↔세션 연결 + 송신 파이프라인
 ├── bridge.test.ts           26 테스트 — 전 구간 시나리오 (FakeTransport + FakeHost)
 ├── config.ts                설정 파일 검증 (신뢰할 수 없는 입력)
+├── LICENSE / CHANGELOG.md / .editorconfig   배포 메타데이터
+├── .github/workflows/ci.yml  check(22.19·24) + 태그 기반 publish (액션은 SHA 고정)
 ├── file-store.ts            상태 영속화(원자적 쓰기, chmod 600). 세션별 격리
 ├── file-store.test.ts       22 테스트 (실제 임시 디렉터리 사용)
 ├── lock.ts                  단일 인스턴스 락. O_EXCL + 생존/만료 회수 + 토큰 검증 해제
@@ -420,7 +422,57 @@ docs(agents): document the transport conformance checklist
 
 ---
 
-## 11. 판단이 필요할 때
+## 11. 릴리스
+
+### 배포 레이아웃
+
+```text
+package.json      pi 매니페스트(`./src/index.ts`) + files 화이트리스트
+LICENSE           MIT (npm이 항상 포함)
+CHANGELOG.md      Keep a Changelog. npm은 자동 포함하지 않으므로 files에 명시해야 한다
+.editorconfig     포맷 규약 (탭, LF, final newline)
+.github/workflows/ci.yml   check(Node 22.19·24) + 태그 기반 publish
+src/              배포 대상. TS를 그대로 올린다 — pi가 jiti로 로드하므로 빌드 단계가 없다
+docs/             분석·아키텍처 문서
+```
+
+**런타임 의존성은 0개다.** `@earendil-works/pi-coding-agent`만 peer dependency고
+빌드 산출물이 없다. 이 상태를 유지해라 — 의존성이 늘면 감사 범위가 늘어난다.
+`dependencies`에 무언가 추가해야 한다면 AGENTS.md §0의 정체성과 충돌하는지 먼저 따져라.
+
+### 버전 규칙
+
+- `0.y.z` 동안 공개 표면(설정 스키마·원격 명령 집합·`Transport` 계약)은 MINOR에서 바뀔 수 있다. README와 CHANGELOG에 이 사실을 유지한다
+- `Transport`에 **필수** 멤버를 추가하는 것은 breaking이다. 선택 멤버 추가는 아니다
+- 설정 파일에 키를 추가하는 것은 additive이며 항상 기본값을 제공한다
+
+### 절차
+
+```text
+1. npm run check — 전체 통과 확인
+2. npm run pack:check — tarball 내용 확인 (테스트·문서가 의도대로 들어가는지)
+3. CHANGELOG.md의 [Unreleased]를 새 버전 섹션으로 옮기고 날짜를 적는다
+4. package.json의 version을 올린다 (CHANGELOG와 일치)
+5. 커밋: chore(release): 0.2.0
+6. 태그: git tag v0.2.0 && git push origin main --tags
+   → CI가 검사 후 npm publish --provenance 수행
+```
+
+로컬에서 급히 발행해야 할 때는 `npm publish`가 가능하지만 **provenance가 붙지 않는다.**
+공급망 서명을 원하면 CI 경로를 쓴다. `prepublishOnly`가 `npm run check`를 실행하므로
+깨진 트리가 발행되는 일은 없다.
+
+### 발행 전 체크리스트
+
+- [ ] `npm run pack:check`의 파일 목록이 의도와 일치한다
+- [ ] tarball을 실제로 설치해 로드되는지 확인했다: `npm pack` → 임시 디렉터리에서 `npm i <tgz>` → `pi install ./node_modules/pi-bot-connect -l` → `pi --list-models --offline`이 0으로 끝난다
+- [ ] `git ls-files | grep -iE 'token|secret|\.env'`가 **가짜 테스트 fixture 외에는** 비어 있다
+- [ ] CHANGELOG에 `Added`/`Changed`/`Fixed`/`Security` 중 해당 항목이 있다
+- [ ] README의 “지원 범위”가 실제 `engines`·peer 범위와 일치한다
+
+---
+
+## 12. 판단이 필요할 때
 
 - 제품 방향/차별점: `docs/feasibility.md`의 §4(차별점)와 §7(결정 필요 사항)
 - 구조/계약: `docs/architecture.md`의 §2(계약), §3(불변식), §5(체크리스트)
