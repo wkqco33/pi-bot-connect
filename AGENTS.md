@@ -339,7 +339,7 @@ import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 | 툴 인자를 진행 상황에 포함 | 토큰/파일 내용 유출 | 툴 이름만 전송 |
 | 이미지가 없는데 "이미지를 봐라"고 주입 | 모델이 존재하지 않는 첨부를 설명하려 함 | 호스트가 `acceptsAttachments: false`면 라우터가 `unsupported`로 거부 |
 | 테스트에서 `setImmediate` 한 번으로 비동기 완료를 기대 | 단독 실행은 통과, 전체 스위트는 실패 (libuv 스레드풀 경합) | 실시간 데드라인 폴링. §4.4 참조 |
-| 텍스트 검색으로 코드 수정 | 무관한 위치 오수정 | 편집은 정확한 문자열 일치, 검색은 시맨틱 도구 사용 |
+| 텍스트 검색으로 코드 수정 | 무관한 위치 오수정 | 편집은 정확한 문자열 일치로, 검색은 `rg`로. (pi-lens를 제거해서 의미 기반 심볼 검색 도구는 없다) |
 | `exactOptionalPropertyTypes` 없이 선택 속성 | `{ threadId: undefined }`가 전송에 새어 들어감 | 스프레드로 조건부 구성: `...(x === undefined ? {} : { x })` |
 | **pi 문서 예제와 실제 타입 불일치** | 이미지를 `{type:"image",source:{type:"base64",mediaType,data}}`로 넣으면 컴파일 실패 | 실제 `ImageContent`는 **평평하다**: `{ type: "image", data, mimeType }`. `docs/extensions.md` 예제는 오래되었다. **컴파일러를 믿어라** |
 | 첨부를 호스트만 보고 허용 | 전송이 바이트를 못 주는데 프롬프트만 전달되어 이미지 없는 텍스트가 됨 | 두 조건을 AND: `host.acceptsAttachments && transport.fetchAttachment !== undefined` (`Bridge.attachmentPolicy`) |
