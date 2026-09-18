@@ -22,7 +22,7 @@ pi install npm:pi-bot-connect
 
 ```bash
 pi install /path/to/pi-bot-connect
-pi install git:github.com/<you>/pi-bot-connect@v0.1.0
+pi install git:github.com/wkqco33/pi-bot-connect@v0.1.0
 pi -e ./src/index.ts          # 현재 디렉터리의 소스로 한 번만 실행
 ```
 
@@ -50,9 +50,10 @@ pi -e ./src/index.ts          # 현재 디렉터리의 소스로 한 번만 실�
 | 암호화 | 없음 — 플랫폼 전송 계층에 의존 |
 | 런타임 의존성 | 0개 |
 
-CI는 Node 22.19와 24에서 `npm run check`를 실행한다
-(`.github/workflows/ci.yml`). 릴리스는 태그를 푸시하면 CI에서
-`npm publish --provenance`로만 수행된다.
+CI는 Node 22.19와 24에서 `npm run check`와 `npm run pack:verify`를 실행한다
+(`.github/workflows/ci.yml`). 릴리스는 `v*` 태그를 푸시하면
+`release.yml`이 태그↔버전 일치를 확인한 뒤 `npm publish --provenance`로만
+수행한다. 저장소: <https://github.com/wkqco33/pi-bot-connect>
 
 ---
 

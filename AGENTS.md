@@ -431,7 +431,9 @@ package.json      pi 매니페스트(`./src/index.ts`) + files 화이트리스�
 LICENSE           MIT (npm이 항상 포함)
 CHANGELOG.md      Keep a Changelog. npm은 자동 포함하지 않으므로 files에 명시해야 한다
 .editorconfig     포맷 규약 (탭, LF, final newline)
-.github/workflows/ci.yml   check(Node 22.19·24) + 태그 기반 publish
+.github/workflows/ci.yml       push/PR → check(Node 22.19·24) + pack:verify
+.github/workflows/release.yml  태그 push → 태그/버전 검증 → npm publish --provenance
+scripts/verify-pack.mjs        배포 게이트. tarball 내용 검증 (배포본에 포함되지 않는다)
 src/              배포 대상. TS를 그대로 올린다 — pi가 jiti로 로드하므로 빌드 단계가 없다
 docs/             분석·아키텍처 문서
 ```
@@ -450,21 +452,49 @@ docs/             분석·아키텍처 문서
 
 ```text
 1. npm run check — 전체 통과 확인
-2. npm run pack:check — tarball 내용 확인 (테스트·문서가 의도대로 들어가는지)
+2. npm run pack:verify — tarball이 기대한 파일만 담는지 확인
 3. CHANGELOG.md의 [Unreleased]를 새 버전 섹션으로 옮기고 날짜를 적는다
 4. package.json의 version을 올린다 (CHANGELOG와 일치)
 5. 커밋: chore(release): 0.2.0
-6. 태그: git tag v0.2.0 && git push origin main --tags
-   → CI가 검사 후 npm publish --provenance 수행
+6. 태그: git tag -a v0.2.0 -m v0.2.0 && git push origin master --follow-tags
+   → release.yml이 검사한 뒤 npm publish --provenance 를 수행한다
 ```
+
+`chore(release): <version>` 커밋과 `v<version>` 태그를 반드시 짝지어라.
+release 워크플로의 첫 job이 **태그와 `package.json` version이 다르면 실패**한다.
 
 로컬에서 급히 발행해야 할 때는 `npm publish`가 가능하지만 **provenance가 붙지 않는다.**
 공급망 서명을 원하면 CI 경로를 쓴다. `prepublishOnly`가 `npm run check`를 실행하므로
 깨진 트리가 발행되는 일은 없다.
 
+### CI / CD
+
+| 워크플로 | 트리거 | 하는 일 |
+| --- | --- | --- |
+| `ci.yml` | `master`·`main` push, PR | Node 22.19와 24에서 `npm run check`, 그리고 `npm run pack:verify` |
+| `release.yml` | `v*` 태그 push | 태그↔version↔`private` 검증 → `npm run check` → `pack:verify` → `npm publish --provenance --access public` → GitHub Release 생성 |
+
+**기본 브랜치는 `master`다.** `main`도 함께 트리거에 넣어 둔 건 이름을 바꿀 때 CI가 조용히 꺼지지 않게 하기 위함이다.
+
+발행 인증은 두 가지를 모두 지원한다 (`Configure npm authentication` 스텝):
+
+| 방식 | 준비 |
+| --- | --- |
+| **npm access token** | 저장소 secret `NPM_TOKEN`에 npm 토큰을 넣는다. 가장 간단하고 오늘 바로 동작한다 |
+| **trusted publishing (OIDC)** | 토큰이 없다. npmjs.com의 패키지 설정에서 Trusted Publisher로 이 저장소와 **workflow 파일명 `release.yml`, environment `npm`**을 등록한다. npm >= 11.5.1이 필요해 워크플로가 자동으로 올린다 |
+
+장기 토큰이 없으므로 **trusted publishing이 더 낫다.** 다만 패키지가 npm에 존재한 뒤에만 설정할 수 있어서, 첫 발행은 토큰이나 로컬 `npm publish`로 해야 한다.
+
+공급망 보호 조치 (바꾸지 말 것):
+
+- 액션은 **커밋 SHA로 고정**한다. `@v4` 같은 태그는 움직일 수 있다
+- **npm 캐시를 어디에도 쓰지 않는다.** 캐시 오염이 발행 경로로 들어오는 걸 막는다
+- `persist-credentials: false` — checkout이 토큰을 `.git/config`에 남기지 않게 한다
+- 발행은 태그에서만. 브랜치 push로는 발행되지 않는다
+
 ### 발행 전 체크리스트
 
-- [ ] `npm run pack:check`의 파일 목록이 의도와 일치한다
+- [ ] `npm run pack:verify`가 통과한다 (필수 파일 존재 + 개발 전용 파일 부재 + `pi` 매니페스트 경로 유효성)
 - [ ] tarball을 실제로 설치해 로드되는지 확인했다: `npm pack` → 임시 디렉터리에서 `npm i <tgz>` → `pi install ./node_modules/pi-bot-connect -l` → `pi --list-models --offline`이 0으로 끝난다
 - [ ] `git ls-files | grep -iE 'token|secret|\.env'`가 **가짜 테스트 fixture 외에는** 비어 있다
 - [ ] CHANGELOG에 `Added`/`Changed`/`Fixed`/`Security` 중 해당 항목이 있다

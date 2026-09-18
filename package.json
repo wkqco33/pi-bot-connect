@@ -16,6 +16,14 @@
   "engines": {
     "node": ">=22.19.0"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wkqco33/pi-bot-connect.git"
+  },
+  "homepage": "https://github.com/wkqco33/pi-bot-connect#readme",
+  "bugs": {
+    "url": "https://github.com/wkqco33/pi-bot-connect/issues"
+  },
   "pi": {
     "extensions": [
       "./src/index.ts"
@@ -34,6 +42,7 @@
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm run test",
     "pack:check": "npm pack --dry-run",
+    "pack:verify": "node scripts/verify-pack.mjs",
     "prepublishOnly": "npm run check"
   },
   "peerDependencies": {

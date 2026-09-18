@@ -1,0 +1,96 @@
+name: release
+
+# Publishing happens only from an annotated tag, never from a branch.
+#   1. bump the version in package.json and move CHANGELOG's [Unreleased]
+#   2. git commit -m "chore(release): 0.2.0"
+#   3. git tag -a v0.2.0 -m v0.2.0 && git push origin master --follow-tags
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: verify the tag matches the package
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      # actions/checkout v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      # actions/setup-node v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22.19"
+      - run: npm ci
+      - name: Tag, version and private flag must all agree
+        id: check
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          tag="${GITHUB_REF_NAME#v}"
+
+          if [ "${tag}" != "${version}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match package.json version ${version}"
+            exit 1
+          fi
+          if [ "$(node -p "require('./package.json').private === true")" = "true" ]; then
+            echo "::error::package.json still has \"private\": true"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "releasing ${version}"
+
+  publish:
+    name: publish ${{ needs.verify.outputs.version }} to npm
+    needs: verify
+    runs-on: ubuntu-latest
+    # A GitHub environment scopes the npm credential and lets you require a
+    # manual approval. GitHub creates it implicitly on first use, so this works
+    # with no setup. If you configure npm trusted publishing instead, set the
+    # same environment name on npmjs.com — the OIDC subject includes it. Delete
+    # this line if you do not want either.
+    environment: npm
+    permissions:
+      contents: write # create the GitHub release
+      id-token: write # npm provenance, and OIDC for trusted publishing
+    steps:
+      # actions/checkout v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22.19"
+      - run: npm ci
+      # prepublishOnly repeats this inside the publish step: the last line of
+      # defence before an immutable artifact leaves the building.
+      - run: npm run check
+      - run: npm run pack:verify
+      - name: Configure npm authentication
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${NPM_TOKEN}" ]; then
+            echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > "$HOME/.npmrc"
+            echo "auth: npm access token (secrets.NPM_TOKEN)"
+          else
+            echo "auth: trusted publishing (OIDC), no token configured"
+            # Trusted publishing needs npm >= 11.5.1; Node 22.19 bundles npm 10.
+            npm install --global npm@^11.5.1
+          fi
+      - name: Publish to npm
+        run: npm publish --provenance --access public
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" --generate-notes
