@@ -118,11 +118,11 @@ Discord는 스레드에서 `channel_id`가 스레드 자체의 id이므로 `conv
 
 | 계층 | 방식 | 현재 |
 | --- | --- | --- |
-| `core/*` | 순수 함수 단위 테스트. 결정적 rng/clock 주입 | 178 테스트 |
-| `bridge.ts` | `FakeTransport` + `FakeHost`로 전 구간 시나리오 | 52 테스트 |
+| `core/*` | 순수 함수 단위 테스트. 결정적 rng/clock 주입 | 182 테스트 |
+| `bridge.ts` | `FakeTransport` + `FakeHost`로 전 구간 시나리오 | 54 테스트 |
 | `config.ts` | 신뢰할 수 없는 JSON 검증 테이블 테스트 | 30 테스트 |
 | `index.ts` | 타입체크 + 배선 테스트(가짜 `ExtensionAPI`로 팩토리 구동). **커버리지 제외** | 36 테스트 |
-| `transports/*` | 계약 conformance + 플랫폼별 payload fixture | 81 테스트 |
+| `transports/*` | 계약 conformance + 플랫폼별 payload fixture | 86 테스트 |
 
 ### 4.2 결정성 확보 방법
 

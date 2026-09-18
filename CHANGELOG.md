@@ -9,26 +9,33 @@
 
 ## [Unreleased]
 
-### Added
+### Planned
 
-- 긴 응답을 전송 한도(2000자) 단위로 나누어 전송. `bridge.maxChunks`(기본 8) 상한을 넘으면 잘렸다고 알린다
-- 진행 카드가 도구 호출 없는 추론 구간에도 `thinking…`을 표시한다
-- Discord typing 표시 (선택적 `Transport.typing()`, 채널당 8초 스로틀). 실패해도 턴을 막지 않는다
 - Telegram 전송 (롱폴링, 4096 bytes, HTML). 코어는 이미 전송 무관이므로 어댑터만 추가하면 된다
 - Slack 전송 (Socket Mode, mrkdwn)
 - 전송 conformance 테스트 키트 (`src/transports/transport-contract.test.ts`)
 - 다이제스트에 TODO 포함 (세션 엔트리의 형태를 먼저 확인한 뒤 방어적으로 파싱)
 - 엔벨로프 record/replay 하네스
+- 프롬프트 인젝션 방어 (도구 정책/승인 게이트). 채팅을 다른 사람과 공유하는 순간 필요해진다 (G1)
+
+## [0.2.0] - 2026-09-18
+
+진행 표시와 긴 응답 처리를 추가한 기능 릴리스. **실제 Discord API 왕복은 여전히 미검증**이고,
+모든 테스트는 봇 토큰·네트워크 없이 가짜 소켓과 가짜 fetch로 수행된다.
+
+### Added
+
+- 긴 응답을 전송 한도(2000자) 단위로 나누어 전송한다. 이전에는 최종 답변을 1200자 요약으로 보냈다
+- `bridge.maxChunks`(기본 8, 1~50). 초과분은 조용히 버리지 않고 `[truncated: N more message(s) were not sent]`로 알린다
+- 진행 카드가 도구 호출 없는 추론 구간에도 `thinking…`을 표시한다 (턴당 카드 1개, edit-in-place)
+- Discord typing 표시 (선택적 `Transport.typing()`, 채널당 8초 스로틀). 실패해도 턴을 막지 않는다
 
 ### Fixed
 
 - 미인증 상태의 채널 잡담에 봇이 페어링 안내로 응답하던 문제. 이제 봇을 호출했거나 DM일 때만 챌린지를 발급한다 (I7)
 - Discord에서 봇 메시지에 답장(reply)만 한 경우 주소 지정으로 인정되지 않던 문제
 - 첨부의 선언된 media type만 믿던 문제. 이제 응답이 실제로 준 content type으로 정책을 재검사한다 (I25)
-
-### Security
-
-- 프롬프트 인젝션 방어. 원격에서 온 턴의 도구 집합 제한 또는 민감 도구 승인 게이트 중 선택 필요
+- `PI_DISCORD_TOKEN`을 export한 셸에서 배선 테스트가 실제 게이트웨이를 열어 실패하던 문제
 
 ## [0.1.1-rc.1] - 2026-09-18
 
