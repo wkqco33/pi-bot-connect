@@ -153,7 +153,8 @@ src/
 │   ├── markdown.ts          전송 flavor별 마크다운 변환
 │   ├── redact.ts            비밀값 리댁션
 │   ├── digest.ts            작업 다이제스트(공유 카드) 생성
-│   ├── message.ts           pi 메시지에서 표시 텍스트 추출
+│   ├── message.ts           pi 메시지에서 표시 텍스트/툴 출력 추출
+│   ├── work.ts              git numstat/브랜치 + 테스트 러너 요약 파서
 │   ├── text.ts              멘션 제거, 접두사 매칭, 이스케이프
 │   └── logger.ts            JSON Lines 로거 + MemoryLogSink(테스트)
 └── transports/
@@ -301,7 +302,17 @@ import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 8. pi -e ./src/index.ts 로 수동 왕복 1회 확인
 ```
 
-계층 분리가 곧 테스트 가능성이다. Discord 전송은 다음을 주입받기 때문에 봇 토큰·네트워크 없이 전 구간이 검증된다: `rest`(REST API), `createSocket`(WebSocket), `scheduler`(타이머).
+계층 분리가 곧 테스트 가능성이다. Discord 전송은 다음을 주입받기 때문에 봇 토큰·네트워크 없이 전 구간이 검증된다: `rest`(REST API), `createSocket`(WebSocket), `scheduler`(타이머), `fetchImpl`(첨부 다운로드).
+
+### 첨부를 지원하려면
+
+`capabilities.attachments`는 "운반할 수 있다"는 선언일 뿐이다. 실제 전달에는 세 가지가 필요하다:
+
+1. `Transport.fetchAttachment(attachment): Promise<FetchedAttachment>` 구현 — 자체 크기 상한을 적용하고, 선언된 크기가 아니라 **다운로드한 바이트**로 검사한다
+2. 호스트가 `acceptsAttachments: true` (pi 어댑터는 `ImageContent`를 넣을 수 있으므로 true)
+3. `config.attachments` 정책(`allowedMediaTypes`, `maxCount`, `maxBytes`)
+
+둘 중 하나라도 빠지면 라우터가 `unsupported`로 거부한다. **프롬프트를 지어내면 안 된다.**
 
 **하지 말 것**:
 - 브리지나 코어에 전송별 분기 추가 (`if (transport === "telegram")`). 그건 capability로 표현해야 한다
@@ -328,6 +339,11 @@ import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 | 테스트에서 `setImmediate` 한 번으로 비동기 완료를 기대 | 단독 실행은 통과, 전체 스위트는 실패 (libuv 스레드풀 경합) | 실시간 데드라인 폴링. §4.4 참조 |
 | 텍스트 검색으로 코드 수정 | 무관한 위치 오수정 | 편집은 정확한 문자열 일치, 검색은 시맨틱 도구 사용 |
 | `exactOptionalPropertyTypes` 없이 선택 속성 | `{ threadId: undefined }`가 전송에 새어 들어감 | 스프레드로 조건부 구성: `...(x === undefined ? {} : { x })` |
+| **pi 문서 예제와 실제 타입 불일치** | 이미지를 `{type:"image",source:{type:"base64",mediaType,data}}`로 넣으면 컴파일 실패 | 실제 `ImageContent`는 **평평하다**: `{ type: "image", data, mimeType }`. `docs/extensions.md` 예제는 오래되었다. **컴파일러를 믿어라** |
+| 첨부를 호스트만 보고 허용 | 전송이 바이트를 못 주는데 프롬프트만 전달되어 이미지 없는 텍스트가 됨 | 두 조건을 AND: `host.acceptsAttachments && transport.fetchAttachment !== undefined` (`Bridge.attachmentPolicy`) |
+| 첨부 크기를 선언값만 믿음 | `content-length`는 힌트다. 실제로 더 큰 파일이 올 수 있다 | 다운로드 후 base64 길이로 다시 검사 (`bridge.ts`, `discord/index.ts`) |
+| 스트리밍 중 진행 상황을 매 툴마다 새 메시지로 | 채팅 도배, 레이트리밋 | `publishProgress`가 스로틀 + `editKey`로 같은 카드 갱신. 턴마다 `beginTurn()` |
+| 테스트 러너 출력을 추측으로 파싱 | 버전이 바뀌면 조용히 틀린다 | `core/work.ts`의 패턴을 fixture로 고정하고, 못 찾으면 exit status로 폴백 |
 
 ---
 
@@ -384,23 +400,23 @@ docs(agents): document the transport conformance checklist
 | 단일 인스턴스 락 | ✅ 완료 |
 | `/connect doctor` | ✅ 완료 |
 | **Discord 전송** | ✅ 완료 (봇 SDK 없이 게이트웨이 직접 구현) |
-| 테스트 | 312 통과 / typecheck 0 에러 / 4회 연속 안정 |
+| 테스트 | 386 통과 / typecheck 0 에러 / 3회 연속 안정 |
+| **첨부(이미지) 전달** | ✅ 완료 (양쪽 capability 확인 + 다운로드 후 크기 재검사) |
+| **진행 상황 edit-in-place** | ✅ 완료 (턴당 카드 1개, 스로틀, 편집 실패 시 폴백) |
+| **다이제스트 데이터 소스** | ✅ 완료 (브랜치 / 변경 파일 / 테스트 결과) |
 | Telegram · Slack 전송 | ❌ 미구현 |
-| 첨부(이미지) 전달 | ❌ 미구현 — 현재는 명시적으로 거부 |
-| 진행 상황 edit-in-place | ◐ `capabilities.edit`/`editKey`는 있으나 브리지가 아직 사용하지 않음 |
-| 다이제스트 데이터 소스 (git diff/TODO/테스트) | ❌ 미구현 — 카드가 얇음 |
+| TODO를 다이제스트에 포함 | ❌ 미구현 — 어떤 TODO 확장의 형태를 읽을지 결정 필요 |
 | 프롬프트 인젝션 방어 | ❌ 미구현 (G1) |
 
 전체 로드맵과 미해결 과제: `docs/architecture.md` §9, `docs/feasibility.md` §6.
 
 ### 다음에 할 일 (권장 순서)
 
-1. **첨부(이미지) 전달** — `Transport.fetchAttachment(ref)` 추가 → `BridgeHost.acceptsAttachments`를 true로. 거부 메시지와 테스트가 이미 자리잡고 있다
-2. **진행 상황 edit-in-place** — 브리지가 `SendReceipt.editKey`를 보관해 `publish("progress", …)`를 편집으로 보내기
-3. **다이제스트 데이터 소스** — `pi.exec("git", …)`로 브랜치/변경 통계, 세션 엔트리에서 TODO
-4. **conformance 테스트 키트** — `src/transports/transport-contract.test.ts`. Telegram 착수 시점
-5. **Telegram 전송** — 롱폴링, 4096 bytes, HTML. `lock.ts` 재사용
-6. **프롬프트 인젝션 방어** (G1) — 채팅을 다른 사람과 공유하기 **전에** 필요
+1. **프롬프트 인젝션 방어** (G1) — 유일하게 남은 보안 공백. 채팅을 다른 사람과 공유하기 **전에** 필요하다. 원격 턴에서만 도구 집합을 제한하는 opt-in 방식이 가장 작은 변경이다
+2. **conformance 테스트 키트** — `src/transports/transport-contract.test.ts`. Telegram 착수 시점
+3. **Telegram 전송** — 롱폴링, 4096 bytes, HTML. `lock.ts` 재사용
+4. **TODO 데이터 소스** — 세션 엔트리에서 읽되, 형태를 먼저 확인하고 방어적으로 파싱
+5. **리플레이 하네스** (G5) — 엔벨로프 record/replay
 
 ---
 

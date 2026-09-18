@@ -61,7 +61,8 @@ interface Transport {
 4. **자격증명은 환경변수에서 읽는다.** 설정 파일에는 env 변수 *이름*만 저장한다.
 5. **`start()`는 백그라운드 리소스를 만들고, `stop()`은 그것을 정리한다.** `stop()`은 두 번 불려도 안전해야 한다.
 6. **재연결/백오프는 어댑터 책임이다.** 코어는 재시도를 하지 않는다.
-7. **conformance 테스트를 통과한다** (아래 5장).
+7. **첨부를 지원하려면 `fetchAttachment`를 구현해야 한다.** `capabilities.attachments: true`는 운반 가능 선언일 뿐이고, 실제 전달 여부는 브리지가 두 capability를 AND해서 결정한다.
+8. **conformance 테스트를 통과한다** (아래 5장).
 
 ### 2.3 capability 예시
 
@@ -96,12 +97,15 @@ Discord는 스레드에서 `channel_id`가 스레드 자체의 id이므로 `conv
 | I10 | 설정 파일은 비밀값을 담을 수 없다(env 변수 이름만). | `config.test.ts` |
 | I11 | 툴 인자/출력은 원격으로 전송되지 않는다(툴 이름만). | `index.ts` 설계 + 리뷰 |
 | I12 | 신뢰 단위는 `transport:userId`다. 맨 userId로는 신뢰하지 않는다. | `bridge.test.ts` |
-| I13 | 호스트가 전달할 수 없는 첨부에 대해 프롬프트를 지어내지 않는다. | `router.test.ts`, `bridge.test.ts` |
+| I13 | 호스트와 전송이 **둘 다** 첨부를 지원할 때만 전달한다. 아니면 프롬프트를 지어내지 않고 거부한다. | `router.test.ts`, `bridge.test.ts` |
 | I14 | 봇 자신과 다른 봇·웹훅의 메시지는 무시한다(무한 루프 방지). | `normalize.test.ts`, `discord/index.test.ts` |
 | I15 | 봇 자격증명당 프로세스는 하나다. 시작 실패 시 락을 남기지 않는다. | `lock.test.ts`, `discord/index.test.ts` |
 | I16 | 전송이 시작에 실패해도 세션은 죽지 않는다. 이유는 `doctor`에 노출된다. | `bridge.test.ts`, `index.test.ts` |
 | I17 | 신뢰·일시정지·브로드캐스트 대상은 세션별로 격리된다. | `file-store.test.ts`, `index.test.ts` |
 | I18 | `diagnose()`는 토큰을 포함하지 않는다. | `discord/index.test.ts`, `lock.test.ts` |
+| I19 | 첨부 크기는 선언값이 아니라 다운로드한 바이트로 검사한다. | `bridge.test.ts`, `discord/index.test.ts` |
+| I20 | 진행 상황은 턴당 메시지 하나를 갱신한다. 툴 호출마다 새 메시지를 보내지 않는다. | `bridge.test.ts` |
+| I21 | 편집이 거부되면 새 메시지로 폴백하며, 카드 핸들은 재사용되지 않는다. | `bridge.test.ts` |
 
 ---
 
@@ -181,6 +185,7 @@ const decision = decidePairing({ ..., now: 10, random: digitSequence("987654") }
 - [ ] `diagnose()`가 있고 토큰을 포함하지 않는다
 - [ ] `send()`가 시작 전이면 명확히 throw한다
 - [ ] 게이트웨이/폴링 연결에 READY 타임아웃이 있다 (무한 대기 금지)
+- [ ] 첨부를 지원하면 `fetchAttachment`가 자체 크기 상한을 적용하고, 선언 크기가 아니라 실제 바이트로 검사한다
 
 ---
 
@@ -221,7 +226,14 @@ const decision = decidePairing({ ..., now: 10, random: digitSequence("987654") }
     "allowUsers": ["telegram:42"],    // transport:userId 사전 신뢰
     "requirePairing": true,
     "requireAddressing": true,        // 채널에서는 봇 호출 시에만 반응
-    "digest": { "maxLength": 1500 }   // 100 ~ 10000
+    "digest": { "maxLength": 1500 },   // 100 ~ 10000
+    // 첨부 전달 정책. allowedMediaTypes에 없는 종류는 명시적으로 거부된다.
+    "attachments": {
+      "allowedMediaTypes": ["image/png", "image/jpeg", "image/gif", "image/webp"],
+      "maxCount": 4,                 // 1 ~ 10
+      "maxBytes": 8388608            // 1024 ~ 52428800
+    },
+    "progressMinIntervalMs": 1000     // 0 ~ 60000. 턴 안에서 진행 카드 갱신 최소 간격
   },
   "transports": {
     // 전송별 설정. 비밀값 금지, env 변수 이름만.
@@ -264,12 +276,12 @@ const decision = decidePairing({ ..., now: 10, random: digitSequence("987654") }
 | G1 | 프롬프트 인젝션 | 메신저로 들어온 텍스트가 로컬 파일을 읽어 밖으로 보내도록 지시할 수 있다. 도구 정책/승인 게이트가 필요 (v2) |
 | G2 | 맥락 병합의 정의 | 원격 턴을 로컬 TUI에 어떻게 "보이게" 할지. `pi.appendEntry` + `registerEntryRenderer` 후보 |
 | G3 | 다중 세션 | 단일 봇 + 다중 세션 라우팅은 브로커가 필요 (v2) |
-| G4 | 진행 상황 편집 | 브리지가 `SendReceipt.editKey`를 보관해 `publish("progress", …)`를 편집으로 보내기. capability는 이미 있다 |
+| G4 | ~~진행 상황 편집~~ | ✅ 완료 — `Bridge.publishProgress`가 턴당 카드 1개를 스로틀·편집하고, 실패 시 새 메시지로 폴백 |
 | G5 | 리플레이 하네스 | 엔벨로프 record/replay로 회귀 테스트 |
 | G6 | ~~단일 인스턴스 락~~ | ✅ 완료 — `src/lock.ts`. O_EXCL 획득, 생존/만료 회수, 토큰 검증 해제 |
 | G7 | 세션 복원 | ✅ 완료 — `FileBridgeStore`가 세션 id로 스코프해 `pi --continue`에서 신뢰가 유지된다 |
-| G8 | 첨부(이미지) 전달 | `Transport.fetchAttachment(ref)` + `BridgeHost.acceptsAttachments`를 true로. 현재는 명시적 거부 |
-| G9 | 다이제스트 데이터 소스 | `branch`/`changes`/`todos`/`testSummary`가 아직 채워지지 않아 카드가 얇다 |
+| G8 | ~~첨부(이미지) 전달~~ | ✅ 완료 — `Transport.fetchAttachment` + `bridge.attachmentPolicy`가 두 capability를 AND |
+| G9 | ~~다이제스트 데이터 소스~~ | ✅ 완료 — 브랜치/변경 파일/테스트 결과. TODO는 형태 미확정으로 보류 |
 | G10 | Slack 타이핑/리액션 | 플랫폼 제약. 어댑터별 fallback 필요 |
 
 ---
