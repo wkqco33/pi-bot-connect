@@ -107,7 +107,17 @@ jobs:
           fi
       - name: Publish to npm
         if: steps.registry.outputs.published == 'false'
-        run: npm publish --provenance --access public
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          # A prerelease must never take over the `latest` dist-tag.
+          case "${VERSION}" in
+            *-*) dist_tag=next ;;
+            *)   dist_tag=latest ;;
+          esac
+          echo "publishing ${VERSION} under the '${dist_tag}' dist-tag"
+          npm publish --provenance --access public --tag "${dist_tag}"
       - name: Explain the skipped publish
         if: steps.registry.outputs.published == 'true'
         run: |
