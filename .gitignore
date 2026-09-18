@@ -1,0 +1,11 @@
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+
+# Never commit local runtime state or credentials
+.bot-connect/
+*.local.json
+.env
+.env.*
