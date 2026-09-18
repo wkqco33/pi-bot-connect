@@ -91,6 +91,24 @@ class FakePi {
 		this.userMessages.push(options?.deliverAs === undefined ? { text } : { text, deliverAs: options.deliverAs });
 	}
 
+	/** Keyed by an argument substring; unmatched calls report "not a repository". */
+	readonly execResults = new Map<string, { stdout: string; code: number }>();
+	readonly execCalls: string[][] = [];
+
+	exec(
+		command: string,
+		args: string[],
+	): Promise<{ stdout: string; stderr: string; code: number; killed: boolean }> {
+		this.execCalls.push([command, ...args]);
+		const key = args.join(" ");
+		for (const [pattern, result] of this.execResults) {
+			if (key.includes(pattern)) {
+				return Promise.resolve({ stdout: result.stdout, stderr: "", code: result.code, killed: false });
+			}
+		}
+		return Promise.resolve({ stdout: "", stderr: "not a git repository", code: 128, killed: false });
+	}
+
 	async emit(event: string, payload: Record<string, unknown>, ctx: FakeCtx): Promise<void> {
 		for (const handler of this.handlers.get(event) ?? []) {
 			await handler(payload, ctx);
@@ -388,5 +406,77 @@ describe("adapter — pairing survives a restart", () => {
 		const { pi, ctx } = await start();
 		await pi.emit("session_shutdown", { reason: "reload" }, ctx);
 		expect(await exists(stateFile)).toBe(true);
+	});
+});
+
+describe("adapter — digest sources", () => {
+	it("includes the branch and changed files from git", async () => {
+		const { pi, ctx } = await start();
+		pi.execResults.set("rev-parse", { stdout: "feat/core\n", code: 0 });
+		pi.execResults.set("numstat", { stdout: "10\t2\tsrc/a.ts\n3\t1\tsrc/b.ts\n", code: 0 });
+
+		await pi.run("digest", ctx);
+
+		expect(ctx.lastNotification).toContain("branch `feat/core`");
+		expect(ctx.lastNotification).toContain("**Changes (2 files, +13/-3)**");
+		expect(ctx.lastNotification).toContain("`src/a.ts` +10/-2");
+	});
+
+	it("runs git against the session directory, not the process directory", async () => {
+		const { pi, ctx } = await start();
+		await pi.run("digest", ctx);
+		expect(pi.execCalls[0]).toEqual(["git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD"]);
+	});
+
+	it("omits git data when git fails", async () => {
+		const { pi, ctx } = await start();
+		await pi.run("digest", ctx);
+		expect(ctx.lastNotification).not.toContain("branch `");
+		expect(ctx.lastNotification).not.toContain("**Changes");
+	});
+
+	it("includes the last shell test run", async () => {
+		const { pi, ctx } = await start();
+		await pi.emit("tool_execution_start", { toolCallId: "t1", toolName: "bash", args: { command: "npm test" } }, ctx);
+		await pi.emit(
+			"tool_execution_end",
+			{
+				toolCallId: "t1",
+				toolName: "bash",
+				isError: false,
+				result: { content: [{ type: "text", text: "      Tests  312 passed (312)" }] },
+			},
+			ctx,
+		);
+
+		await pi.run("digest", ctx);
+		expect(ctx.lastNotification).toContain("**Tests:** npm test — 312 passed");
+	});
+
+	it("does not report a non-test command as a test run", async () => {
+		const { pi, ctx } = await start();
+		await pi.emit("tool_execution_start", { toolCallId: "t1", toolName: "bash", args: { command: "ls -la" } }, ctx);
+		await pi.emit("tool_execution_end", { toolCallId: "t1", toolName: "bash", isError: false, result: {} }, ctx);
+
+		await pi.run("digest", ctx);
+		expect(ctx.lastNotification).not.toContain("**Tests:**");
+	});
+
+	it("reports a failing test run", async () => {
+		const { pi, ctx } = await start();
+		await pi.emit("tool_execution_start", { toolCallId: "t1", toolName: "bash", args: { command: "go test ./..." } }, ctx);
+		await pi.emit("tool_execution_end", { toolCallId: "t1", toolName: "bash", isError: true, result: {} }, ctx);
+
+		await pi.run("digest", ctx);
+		expect(ctx.lastNotification).toContain("go test ./... — failed");
+	});
+
+	it("shows the card locally when nothing is paired", async () => {
+		const { pi, ctx } = await start();
+		pi.execResults.set("rev-parse", { stdout: "main\n", code: 0 });
+		await pi.run("digest", ctx);
+		expect(ctx.lastNotification).toContain("No paired conversation");
+		expect(ctx.lastNotification).toContain("### wiring-session — idle");
+		expect(ctx.lastNotification).toContain("branch `main`");
 	});
 });

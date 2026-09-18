@@ -29,3 +29,32 @@ export function summarize(text: string, maxLength = 400): string {
 	if (collapsed.length <= maxLength) return collapsed;
 	return `${collapsed.slice(0, Math.max(0, maxLength - 1))}…`;
 }
+
+/**
+ * Pulls display text out of a tool result.
+ *
+ * The exact shape differs per tool and per pi version, so every plausible
+ * location is checked and the longest candidate wins. Returning "" is always
+ * acceptable: callers fall back to the tool's exit status.
+ */
+export function extractToolText(result: unknown): string {
+	if (typeof result === "string") return result;
+	if (!isRecord(result)) return "";
+
+	const candidates: string[] = [extractAssistantText(result.content)];
+	if (typeof result.output === "string") candidates.push(result.output);
+
+	const details = result.details;
+	if (isRecord(details)) {
+		for (const key of ["output", "stdout", "text"]) {
+			const value = details[key];
+			if (typeof value === "string") candidates.push(value);
+		}
+	}
+
+	let longest = "";
+	for (const candidate of candidates) {
+		if (candidate.length > longest.length) longest = candidate;
+	}
+	return longest;
+}

@@ -19,9 +19,11 @@ import { Bridge, MemoryBridgeStore, type BridgeHost, type BridgeStore } from "./
 import { parseConfigFile } from "./config.js";
 import { formatDuration } from "./core/commands.js";
 import { buildWorkDigest } from "./core/digest.js";
-import { extractAssistantText, summarize } from "./core/message.js";
+import type { DigestFileChange } from "./core/digest.js";
+import { extractAssistantText, extractToolText, summarize } from "./core/message.js";
 import { formatChallengeCode } from "./core/pairing.js";
 import { resolveConfig, type BridgeConfig, type Logger, type PromptImage } from "./core/types.js";
+import { parseGitBranch, parseGitNumstat, summarizeTestRun } from "./core/work.js";
 import { FileBridgeStore } from "./file-store.js";
 import { createTransports, listTransportFactories } from "./transports/index.js";
 
@@ -175,6 +177,17 @@ function buildPromptContent(
 	];
 }
 
+/** The last shell command the agent ran, used for the digest's test line. */
+interface LastShellRun {
+	readonly command: string;
+	readonly failed: boolean;
+	readonly output: string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 // ---------------------------------------------------------------------------
 // Extension
 // ---------------------------------------------------------------------------
@@ -190,6 +203,9 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 	let runningTool: string | undefined;
 	let lastAssistantText = "";
 	let lastUserPrompt = "";
+	let lastShell: LastShellRun | null = null;
+	/** Keyed by tool call id so parallel bash calls cannot overwrite each other. */
+	const shellCommands = new Map<string, string>();
 
 	const host: BridgeHost = {
 		sendPrompt(text, options) {
@@ -291,6 +307,9 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 
 	async function buildDigest(ctx: ExtensionContext): Promise<string> {
 		const active = bridge;
+		const work = await collectWorkContext(ctx.cwd);
+		const testSummary = lastShell === null ? undefined : summarizeTestRun(lastShell);
+
 		return buildWorkDigest(
 			{
 				cwd: ctx.cwd,
@@ -299,9 +318,42 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 				runningTool,
 				lastUserPrompt: lastUserPrompt.length > 0 ? lastUserPrompt : undefined,
 				lastAssistantSummary: lastAssistantText.length > 0 ? summarize(lastAssistantText, 300) : undefined,
+				...work,
+				testSummary,
 			},
 			{ maxLength: active?.config.digest.maxLength },
 		);
+	}
+
+	/**
+	 * Gathers git state for the digest. Every failure is soft: a project that is
+	 * not a git repository simply produces a digest without branch information.
+	 */
+	async function collectWorkContext(
+		cwd: string,
+	): Promise<{ branch?: string; changes?: DigestFileChange[] }> {
+		const branchOutput = await runGit(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
+		const numstatOutput = await runGit(cwd, ["diff", "--numstat", "HEAD"]);
+
+		const branch = branchOutput === null ? undefined : parseGitBranch(branchOutput);
+		const changes = numstatOutput === null ? undefined : parseGitNumstat(numstatOutput, { max: 50 });
+
+		return {
+			...(branch === undefined ? {} : { branch }),
+			...(changes === undefined ? {} : { changes }),
+		};
+	}
+
+	async function runGit(cwd: string, args: readonly string[]): Promise<string | null> {
+		try {
+			// `-C` rather than a cwd option: the session cwd is not necessarily the
+			// process cwd.
+			const result = await pi.exec("git", ["-C", cwd, ...args], { timeout: 5_000 });
+			return result.code === 0 ? result.stdout : null;
+		} catch (error) {
+			logger.debug("git command failed", { args: args.join(" "), error: String(error) });
+			return null;
+		}
 	}
 
 	async function handleLocalCommand(args: string, ctx: ExtensionContext): Promise<void> {
@@ -347,10 +399,12 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 		if (sub === "digest") {
 			const digest = await buildDigest(ctx);
 			const delivered = await active.publish("digest", digest);
-			ctx.ui.notify(
-				delivered > 0 ? `Digest sent to ${delivered} conversation(s).` : "No paired conversation to send a digest to.",
-				delivered > 0 ? "info" : "warning",
-			);
+			if (delivered > 0) {
+				ctx.ui.notify(`Digest sent to ${delivered} conversation(s).`, "info");
+				return;
+			}
+			// Nothing is paired yet, so show the card locally instead of dropping it.
+			ctx.ui.notify(`No paired conversation to send a digest to. Preview:\n\n${digest}`, "warning");
 			return;
 		}
 
@@ -455,6 +509,9 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 	pi.on("tool_execution_start", async (event, ctx) => {
 		sessionCtx = ctx;
 		runningTool = event.toolName;
+		if (event.toolName === "bash" && isRecord(event.args) && typeof event.args.command === "string") {
+			shellCommands.set(event.toolCallId, event.args.command);
+		}
 		// Only the tool *name* is ever sent: arguments routinely carry paths, tokens
 		// and file contents. The bridge throttles and edits one card per turn.
 		await bridge?.publishProgress(`▶ ${event.toolName}`);
@@ -463,6 +520,15 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 	pi.on("tool_execution_end", async (event, ctx) => {
 		sessionCtx = ctx;
 		runningTool = undefined;
+
+		if (event.toolName === "bash") {
+			const command = shellCommands.get(event.toolCallId);
+			shellCommands.delete(event.toolCallId);
+			if (command !== undefined) {
+				lastShell = { command, failed: event.isError === true, output: extractToolText(event.result) };
+			}
+		}
+
 		await bridge?.publishProgress(`${event.isError === true ? "✕" : "✓"} ${event.toolName}`);
 	});
 
