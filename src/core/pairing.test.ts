@@ -89,6 +89,19 @@ describe("decidePairing", () => {
 		expect(decision).toEqual({ type: "ask", pending, reason: "awaiting" });
 	});
 
+	it("does not consume an attempt for a numeric message of the wrong length", () => {
+		const pending = { code: "123456", expiresAt: 1000, attempts: 0 };
+		const decision = decidePairing({ pending, text: "meeting at 3pm", now: 10, options: OPTIONS, random: () => 0 });
+		expect(decision).toEqual({ type: "ask", pending, reason: "awaiting" });
+	});
+
+	it("does not lock the challenge on unrelated channel chatter", () => {
+		const pending = { code: "123456", expiresAt: 1000, attempts: 0 };
+		const strict: PairingOptions = { ...OPTIONS, maxAttempts: 1 };
+		const decision = decidePairing({ pending, text: "42", now: 10, options: strict, random: () => 0 });
+		expect(decision).toEqual({ type: "ask", pending, reason: "awaiting" });
+	});
+
 	it("counts a wrong code and keeps the same challenge", () => {
 		const pending = { code: "123456", expiresAt: 1000, attempts: 0 };
 		const decision = decidePairing({ pending, text: "000000", now: 10, options: OPTIONS, random: () => 0 });

@@ -135,9 +135,9 @@ PI_BOT_CONNECT_DEBUG=1 pi -e ./src/index.ts   # 어댑터 로그 활성화
 ```text
 src/
 ├── index.ts                 [껍데기] pi 어댑터. 커버리지 제외. 정책 금지
-├── index.test.ts            배선 테스트 36개 — 가짜 ExtensionAPI로 팩토리를 구동
+├── index.test.ts            배선 테스트 46개 — 가짜 ExtensionAPI로 팩토리를 구동
 ├── bridge.ts                오케스트레이션. 전송↔코어↔세션 연결 + 송신 파이프라인
-├── bridge.test.ts           52 테스트 — 전 구간 시나리오 (FakeTransport + FakeHost)
+├── bridge.test.ts           74 테스트 — 전 구간 시나리오 (FakeTransport + FakeHost)
 ├── config.ts                설정 파일 검증 (신뢰할 수 없는 입력)
 ├── LICENSE / CHANGELOG.md / .editorconfig   배포 메타데이터
 ├── .github/workflows/ci.yml  check(22.19·24) + 태그 기반 publish (액션은 SHA 고정)
@@ -159,18 +159,31 @@ src/
 │   ├── message.ts           pi 메시지에서 표시 텍스트/툴 출력 추출
 │   ├── work.ts              git numstat/브랜치 + 테스트 러너 요약 파서
 │   ├── text.ts              멘션 제거, 접두사 매칭, 이스케이프
+│   ├── tool-policy.ts       원격 턴 도구 정책 + 승인 프롬프트 (G1). 순수 판정
+│   ├── rate-limit.ts        신원별 토큰 버킷. now 주입
+│   ├── todo.ts              어시스턴트 체크리스트 → 다이제스트 TODO. 순수
+│   ├── transcript.ts        엔벨로프 record/replay 코덱 (리댁션 + raw 제거)
 │   └── logger.ts            JSON Lines 로거 + MemoryLogSink(테스트)
 └── transports/
     ├── index.ts             전송 팩토리 레지스트리 (coverage 제외)
     ├── index.test.ts        팩토리 배선 테스트
     ├── fake.ts              인메모리 전송. 테스트 + 봇 토큰 없는 개발용
-    └── discord/
+    ├── replay.ts            transcript를 브리지로 재생하는 개발용 전송
+    ├── transport-contract.test.ts  새 어댑터가 통과해야 하는 공유 conformance 키트
+    ├── discord/
         ├── normalize.ts     ★ 순수. Discord payload → Envelope
         ├── normalize.test.ts
         ├── gateway.ts       HELLO/IDENTIFY/RESUME/하트비트/재접속 상태머신
         ├── gateway.test.ts  가짜 소켓 + 가짜 스케줄러
         ├── rest.ts          fetch 4종 + 레이트리밋 재시도
         ├── index.ts         전송 본체: 신원 확인 → 락 → 게이트웨이
+        ├── index.test.ts
+        └── doubles.ts       공유 테스트 더블 (coverage 제외)
+    └── telegram/
+        ├── normalize.ts     ★ 순수. Telegram update → Envelope (+ 커맨드 멘션 정규화)
+        ├── normalize.test.ts
+        ├── rest.ts          Bot API + 롱폴링 요청 + 레이트리밋/5xx 재시도
+        ├── index.ts         전송 본체: getMe → 락 → 롱폴링 루프
         ├── index.test.ts
         └── doubles.ts       공유 테스트 더블 (coverage 제외)
 ```
@@ -299,7 +312,7 @@ import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
    - 자격증명은 env 변수에서 읽는다 (설정 파일에는 변수 이름만)
 3. 실제 payload를 fixture로 저장한다 (토큰 마스킹)
 4. 정규화 테스트 작성: isDirect, addressed, 자기 메시지 무시, 다른 봇 무시, 스레드 구분
-5. conformance 체크리스트(docs/architecture.md §5)를 항목별로 통과시킨다
+5. `src/transports/transport-contract.test.ts`에 harness를 추가하고 통과시킨다 (docs/architecture.md §5 체크리스트의 자동화판)
 6. npm run check — 그리고 **전체 스위트를 3회 이상 반복**해 타이밍 플레이크를 확인한다
 7. README에 설정 방법(env 변수, 플랫폼 앱 설정 절차)을 추가한다
 8. pi -e ./src/index.ts 로 수동 왕복 1회 확인
@@ -334,7 +347,8 @@ import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 | 자기/다른 봇 메시지를 그대로 주입 | 무한 루프. 두 봇이 서로에게 응답 | `normalize`에서 `author.bot`/`webhook_id`/자기 id를 skip. `last skip`을 `diagnose()`에 노출 |
 | 확장 팩토리에서 소켓/타이머 시작 | pi 시작이 멈추거나 좀비 프로세스 | `session_start`로 미룬다 |
 | 전송 시작 중 락을 남기고 실패 | 이후 모든 세션이 "다른 프로세스가 락을 보유"로 막힘 | `start()` 실패 경로에서 반드시 `lock.release()`. 테스트로 고정됨 |
-| 게이트웨이 READY를 무한 대기 | 시작이 영원히 매달림 | `readyTimeoutMs`(기본 20초) 후 fail |
+| 게이트웨이 READY를 무한 대기 | 시작이 영원히 매달림 | `readyTimeoutMs`(기본 20초) 후 fail. 재연결도 매 연결마다 데드라인을 다시 건다 (`gateway.ts`) |
+| 롱폴링 전송의 `stop()`이 진행 중인 요청을 기다림 | 롱폴이 최대 타임아웃(수십 초)까지 끝나지 않아 종료가 멈춤 | 전송이 `AbortController`를 들고 `stop()`에서 abort한다. `getUpdates`가 signal을 받는다 (`telegram/index.ts`) |
 | `agent_end`로 완료 알림 | 재시도/자동 압축 중에 알림이 나감 | `agent_settled` 사용 |
 | 스트리밍 중 `deliverAs` 없이 주입 | throw | `isIdle()` 확인 + 레이스 가드 (`index.ts`) |
 | 툴 인자를 진행 상황에 포함 | 토큰/파일 내용 유출 | 툴 이름만 전송 |
@@ -408,29 +422,34 @@ docs(agents): document the transport conformance checklist
 | 단일 인스턴스 락 | ✅ 완료 |
 | `/connect doctor` | ✅ 완료 |
 | **Discord 전송** | ✅ 완료 (봇 SDK 없이 게이트웨이 직접 구현) |
-| 테스트 | 488 통과 / typecheck 0 에러 / 3회 연속 안정 |
+| 테스트 | 651 통과 / typecheck 0 에러 / 3회 연속 안정 |
 | **첨부(이미지) 전달** | ✅ 완료 (양쪽 capability 확인 + 다운로드 후 크기 재검사) |
 | **진행 상황 edit-in-place** | ✅ 완료 (턴당 카드 1개, 스로틀, 편집 실패 시 폴백) |
 | **추론 진행 카드 + typing** | ✅ 완료 (툴 없는 구간은 `thinking…`, 선택적 `typing()`은 베스트 에포트) |
 | **긴 응답 분할** | ✅ 완료 (전송 한도 단위로 분할, `maxChunks` 상한 + 잘림 안내) |
 | **의미 단위(헤딩) 분할** | ✅ 완료 (섹션 경계 우선, 헤딩 고아 없음, 펜스 원자성 + 초과 펜스 복구) |
 | **다이제스트 데이터 소스** | ✅ 완료 (브랜치 / 변경 파일 / 테스트 결과) |
-| Telegram · Slack 전송 | ❌ 미구현 |
-| TODO를 다이제스트에 포함 | ❌ 미구현 — 어떤 TODO 확장의 형태를 읽을지 결정 필요 |
-| 프롬프트 인젝션 방어 | ❌ 미구현 (G1) |
-| npm 배포 | ✅ 0.1.0 공개. 다음 릴리스는 `package.json`의 `0.1.1`을 태그하면 CI가 provenance와 함께 발행 |
+| **Telegram 전송** | ✅ 완료 (롱폴링, 4096 bytes, HTML, `lock.ts` 재사용) |
+| **전송 conformance 키트** | ✅ 완료 (`transport-contract.test.ts`, Fake·Discord·Telegram 3종 통과) |
+| Slack 전송 | ❌ 미구현 |
+| **TODO를 다이제스트에 포함** | ✅ 완료 (`core/todo.ts`가 어시스턴트 체크리스트를 파싱) |
+| **송신 실패 격리 / 게이트웨이 재연결 / 요청 타임아웃·재시도** | ✅ 완료 (I30~I32) |
+| **원격 턴 도구 정책 + 승인 (`remoteToolPolicy`/`remoteToolApproval`)** | ✅ 완료 (I34, I39, G1) |
+| **rate limit + 감사 로그** | ✅ 완료 (I37, I38) |
+| **리플레이 하네스** | ✅ 완료 (`core/transcript.ts` + `transports/replay.ts`, I42) |
+| **브로드캐스트 정책 (`broadcast`)** | ✅ 완료 (I35) |
+| **리댁션 확장 + 규칙명 로깅** | ✅ 완료 (I36) |
+| npm 배포 | ✅ 0.3.0 공개. 다음 릴리스는 `package.json` 버전을 올려 `v<version>` 태그를 푸시하면 CI가 provenance와 함께 발행 |
 | CI / 릴리스 파이프라인 | ✅ `master` push + PR에서 CI, `v*` 태그에서 OIDC 발행. `0.1.1-rc.1`로 검증 완료 |
-| **실제 Discord 왕복** | ❌ 미검증 — 폐쇄망으로 보류. 첫 실사용이 진짜 통합 테스트 |
+| **실제 Discord 왕복** | ✅ 0.3.0에서 검증 (텍스트·이미지 프롬프트, 진행 카드, 긴 답변 분할) |
 
 전체 로드맵과 미해결 과제: `docs/architecture.md` §9, `docs/feasibility.md` §6.
 
 ### 다음에 할 일 (권장 순서)
 
-1. **프롬프트 인젝션 방어** (G1) — 유일하게 남은 보안 공백. 채팅을 다른 사람과 공유하기 **전에** 필요하다. 원격 턴에서만 도구 집합을 제한하는 opt-in 방식이 가장 작은 변경이다
-2. **conformance 테스트 키트** — `src/transports/transport-contract.test.ts`. Telegram 착수 시점
-3. **Telegram 전송** — 롱폴링, 4096 bytes, HTML. `lock.ts` 재사용
-4. **TODO 데이터 소스** — 세션 엔트리에서 읽되, 형태를 먼저 확인하고 방어적으로 파싱
-5. **리플레이 하네스** (G5) — 엔벨로프 record/replay
+1. **Slack 전송** — Socket Mode, mrkdwn, 4000자. `transport-contract.test.ts`에 harness 1개를 추가하고 `transports/index.ts`에 팩토리를 등록한다
+2. **단일 봇 + 다중 세션 브로커** (G3) — 별도 프로세스가 전송 연결을 소유하고 로컬 IPC로 세션에 라우팅한다. 세션↔대화 바인딩 정책을 먼저 결정해야 한다
+3. **맥락 병합** (G2) — 원격 턴을 로컬 TUI에 `pi.appendEntry`로 남길지
 
 ---
 

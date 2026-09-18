@@ -206,6 +206,65 @@ describe("DiscordGateway — resume and reconnect", () => {
 		await expect(started).rejects.toThrow(/kept failing/);
 		expect(h.gateway.state).toBe("error");
 	});
+
+	it("re-arms the ready deadline after a reconnect", async () => {
+		const h = setup({ backoffMs: [10, 20], readyTimeoutMs: 5_000 });
+		const started = h.gateway.start();
+		await flush();
+		h.sockets[0]?.emit({ op: 10, d: { heartbeat_interval: 40_000 } });
+		h.sockets[0]?.emit(readyFrame());
+		await started;
+
+		h.sockets[0]?.emitClose(1006, "abnormal closure");
+		h.scheduler.fireTimeouts(10);
+		await flush();
+
+		// The reconnected socket never sends HELLO. Without a fresh deadline the
+		// gateway would sit in "reconnecting" forever.
+		expect(h.scheduler.timeoutDelays).toContain(5_000);
+		h.scheduler.fireTimeouts(5_000);
+		expect(h.gateway.state).toBe("reconnecting");
+		expect(h.scheduler.timeoutDelays).toContain(20);
+	});
+
+	it("returns to ready when the server resumes the session", async () => {
+		const h = setup({ backoffMs: [10, 20] });
+		const started = h.gateway.start();
+		await flush();
+		h.sockets[0]?.emit({ op: 10, d: { heartbeat_interval: 40_000 } });
+		h.sockets[0]?.emit(readyFrame({ sessionId: "sess-9", resumeUrl: "wss://resume.example" }));
+		await started;
+
+		h.sockets[0]?.emitClose(1006, "abnormal closure");
+		h.scheduler.fireTimeouts(10);
+		await flush();
+
+		const second = h.sockets[1] as FakeSocket;
+		second.emit({ op: 10, d: { heartbeat_interval: 40_000 } });
+		second.emit(dispatchFrame(9, "RESUMED", {}));
+
+		expect(h.gateway.state).toBe("ready");
+		expect(h.gateway.describe()).toContain("ready");
+	});
+
+	it("resets the reconnect budget after a successful resume", async () => {
+		const h = setup({ backoffMs: [10, 20], readyTimeoutMs: 5_000 });
+		const started = h.gateway.start();
+		await flush();
+		h.sockets[0]?.emit({ op: 10, d: { heartbeat_interval: 40_000 } });
+		h.sockets[0]?.emit(readyFrame({ sessionId: "sess-9", resumeUrl: "wss://resume.example" }));
+		await started;
+
+		h.sockets[0]?.emitClose(1006, "abnormal closure");
+		h.scheduler.fireTimeouts(10);
+		await flush();
+		const second = h.sockets[1] as FakeSocket;
+		second.emit({ op: 10, d: { heartbeat_interval: 40_000 } });
+		second.emit(dispatchFrame(9, "RESUMED", {}));
+
+		second.emitClose(1006, "abnormal closure");
+		expect(h.scheduler.timeoutDelays).toContain(10);
+	});
 });
 
 describe("DiscordGateway — failure and shutdown", () => {

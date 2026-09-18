@@ -54,6 +54,30 @@ describe("parseConfigFile — accepted input", () => {
 	it("normalizes a digest section that only sets maxLength", () => {
 		expect(parseConfigFile({ bridge: { digest: { maxLength: 400 } } }).config.digest).toEqual({ maxLength: 400 });
 	});
+
+	it("accepts every remote tool policy", () => {
+		for (const policy of ["unrestricted", "read-only", "no-tools"] as const) {
+			expect(parseConfigFile({ bridge: { remoteToolPolicy: policy } }).config.remoteToolPolicy).toBe(policy);
+		}
+	});
+
+	it("accepts every remote tool approval mode", () => {
+		for (const mode of ["off", "each"] as const) {
+			expect(parseConfigFile({ bridge: { remoteToolApproval: mode } }).config.remoteToolApproval).toBe(mode);
+		}
+	});
+
+	it("parses a broadcast section over the defaults", () => {
+		const result = parseConfigFile({ bridge: { broadcast: { replies: false } } });
+		expect(result.errors).toEqual([]);
+		expect(result.config.broadcast).toEqual({ progress: true, replies: false });
+	});
+
+	it("parses a rate limit section over the defaults", () => {
+		const result = parseConfigFile({ bridge: { rateLimit: { promptsPerMinute: 0 } } });
+		expect(result.errors).toEqual([]);
+		expect(result.config.rateLimit).toEqual({ promptsPerMinute: 0, commandsPerMinute: 60 });
+	});
 });
 
 describe("parseConfigFile — rejected input", () => {
@@ -84,6 +108,30 @@ describe("parseConfigFile — rejected input", () => {
 	it("rejects an unknown busyDelivery value", () => {
 		expect(parseConfigFile({ bridge: { busyDelivery: "queue" } }).errors).toContain(
 			'bridge.busyDelivery: expected "steer" or "followUp", received "queue"',
+		);
+	});
+
+	it("rejects an unknown remote tool policy with its path", () => {
+		expect(parseConfigFile({ bridge: { remoteToolPolicy: "readonly" } }).errors).toContain(
+			'bridge.remoteToolPolicy: expected "unrestricted", "read-only" or "no-tools", received "readonly"',
+		);
+	});
+
+	it("rejects an unknown remote tool approval mode with its path", () => {
+		expect(parseConfigFile({ bridge: { remoteToolApproval: "always" } }).errors).toContain(
+			'bridge.remoteToolApproval: expected "off" or "each", received "always"',
+		);
+	});
+
+	it("rejects a non-boolean broadcast flag with its path", () => {
+		expect(parseConfigFile({ bridge: { broadcast: { replies: "no" } } }).errors).toContain(
+			"bridge.broadcast.replies: expected a boolean, received string",
+		);
+	});
+
+	it("rejects an out-of-range rate limit with its path", () => {
+		expect(parseConfigFile({ bridge: { rateLimit: { promptsPerMinute: -1 } } }).errors).toContain(
+			"bridge.rateLimit.promptsPerMinute: expected an integer between 0 and 600, received -1",
 		);
 	});
 

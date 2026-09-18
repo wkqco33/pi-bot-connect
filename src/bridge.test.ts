@@ -408,6 +408,25 @@ describe("Bridge — outbound shaping", () => {
 		expect(transport.lastSent?.text).toContain("[redacted:github-token]");
 	});
 
+	it("records which redaction rule fired without the secret", async () => {
+		const sink = new MemoryLogSink();
+		const host = new FakeHost();
+		host.logger = createLogger("test", sink, "debug");
+		const bridge = new Bridge({ host, config: { requirePairing: false } });
+		const transport = new FakeTransport();
+		await bridge.register(transport);
+
+		await bridge.send({
+			transport: "fake",
+			conversationId: "conv-1",
+			kind: "reply",
+			text: "key ghp_ABCDEFGHIJKLMNOPQRSTUVWX",
+		});
+
+		expect(sink.lines.join("\n")).toContain("github-token");
+		expect(sink.lines.join("\n")).not.toContain("ABCDEF");
+	});
+
 	it("never logs prompt text", async () => {
 		const sink = new MemoryLogSink();
 		const host = new FakeHost();
@@ -488,6 +507,103 @@ describe("Bridge — outbound shaping", () => {
 		await transport.inject({ text: "/pause" });
 		await transport.inject({ text: "do work" });
 		expect(transport.lastSent?.text).toBe(PAUSED_NOTICE);
+	});
+});
+
+describe("Bridge — broadcast policy", () => {
+	it("suppresses progress cards when progress broadcast is off", async () => {
+		const { bridge, host, transport } = await setup(
+			{ broadcast: { progress: false, replies: true } },
+			{ edit: true },
+		);
+		await transport.inject({ text: "start" });
+		transport.sent.length = 0;
+
+		bridge.beginTurn();
+		expect(await bridge.publishTurnStart()).toBe(0);
+		host.clock += 2_000;
+		expect(await bridge.publishProgress("▶ bash")).toBe(0);
+		expect(transport.sent).toEqual([]);
+	});
+
+	it("suppresses the final reply when reply broadcast is off", async () => {
+		const { bridge, transport } = await setup({ broadcast: { progress: true, replies: false } });
+		await transport.inject({ text: "start" });
+		transport.sent.length = 0;
+
+		expect(await bridge.publish("reply", "the answer")).toBe(0);
+		expect(transport.sent).toEqual([]);
+	});
+
+	it("still delivers an explicit digest when reply broadcast is off", async () => {
+		const { bridge, transport } = await setup({ broadcast: { progress: true, replies: false } });
+		await transport.inject({ text: "start" });
+		transport.sent.length = 0;
+
+		expect(await bridge.publish("digest", "card")).toBe(1);
+		expect(transport.lastSent?.text).toBe("card");
+	});
+
+	it("broadcasts by default", async () => {
+		const { bridge, transport } = await setup();
+		await transport.inject({ text: "start" });
+		transport.sent.length = 0;
+		expect(await bridge.publish("reply", "the answer")).toBe(1);
+	});
+});
+
+describe("Bridge — outbound failure isolation", () => {
+	it("resolves to null instead of throwing when the transport rejects the send", async () => {
+		const { bridge, transport } = await setup();
+		transport.failSends = true;
+
+		await expect(
+			bridge.send({ transport: "fake", conversationId: "conv-1", kind: "reply", text: "hello" }),
+		).resolves.toBeNull();
+	});
+
+	it("keeps broadcasting to the other transports when one rejects", async () => {
+		const host = new FakeHost();
+		const bridge = new Bridge({ host, config: { requirePairing: false } });
+		const failing = new FakeTransport({ id: "failing" });
+		const healthy = new FakeTransport({ id: "healthy" });
+		await bridge.register(failing);
+		await bridge.register(healthy);
+		await failing.inject({ text: "start" });
+		await healthy.inject({ text: "start" });
+		failing.sent.length = 0;
+		healthy.sent.length = 0;
+		failing.failSends = true;
+
+		const delivered = await bridge.publish("progress", "working…");
+
+		expect(delivered).toBe(1);
+		expect(healthy.lastSent?.text).toBe("working…");
+	});
+
+	it("does not count a progress card that the transport rejected", async () => {
+		const { bridge, transport } = await setup();
+		await transport.inject({ text: "start" });
+		transport.failSends = true;
+
+		bridge.beginTurn();
+		await expect(bridge.publishProgress("▶ bash")).resolves.toBe(0);
+	});
+
+	it("keeps routing after a reply send is rejected", async () => {
+		const { host, bridge, transport } = await setup();
+		transport.failSends = true;
+
+		await bridge.onEnvelope({
+			transport: "fake",
+			conversationId: "conv-1",
+			userId: "user-1",
+			timestamp: 0,
+			isDirect: true,
+			text: "/status",
+		});
+
+		expect(host.prompts).toEqual([]);
 	});
 });
 
@@ -723,6 +839,84 @@ describe("Bridge — lifecycle", () => {
 	it("reports a running transport with no diagnostics detail", async () => {
 		const { bridge } = await setup();
 		expect(bridge.diagnostics()).toEqual([{ id: "fake", status: "running" }]);
+	});
+});
+
+describe("Bridge — remote rate limit", () => {
+	it("throttles a prompt burst and notifies once", async () => {
+		const { host, transport } = await setup({ rateLimit: { promptsPerMinute: 2, commandsPerMinute: 60 } });
+
+		for (let i = 0; i < 5; i++) await transport.inject({ text: `prompt ${i}` });
+
+		expect(host.prompts).toHaveLength(2);
+		expect(transport.sent.filter((message) => message.text.includes("Too many"))).toHaveLength(1);
+	});
+
+	it("refills tokens as time passes", async () => {
+		const { host, transport } = await setup({ rateLimit: { promptsPerMinute: 1, commandsPerMinute: 60 } });
+		await transport.inject({ text: "one" });
+		await transport.inject({ text: "two" });
+		expect(host.prompts).toHaveLength(1);
+
+		host.clock += 60_000;
+		await transport.inject({ text: "three" });
+		expect(host.prompts).toHaveLength(2);
+	});
+
+	it("limits each identity independently", async () => {
+		const { host, transport } = await setup({
+			allowUsers: ["fake:user-2"],
+			rateLimit: { promptsPerMinute: 1, commandsPerMinute: 60 },
+		});
+
+		await transport.inject({ text: "a", userId: "user-1" });
+		await transport.inject({ text: "b", userId: "user-2" });
+
+		expect(host.prompts).toHaveLength(2);
+	});
+
+	it("still answers commands when prompts are throttled", async () => {
+		const { transport } = await setup({ rateLimit: { promptsPerMinute: 1, commandsPerMinute: 60 } });
+		await transport.inject({ text: "one" });
+		await transport.inject({ text: "two" });
+
+		await transport.inject({ text: "/status" });
+
+		expect(transport.lastSent?.text).toContain("pi-bot-connect status");
+	});
+});
+
+describe("Bridge — audit trail", () => {
+	it("records a pairing without the code", async () => {
+		const sink = new MemoryLogSink();
+		const host = new FakeHost();
+		host.logger = createLogger("test", sink, "debug");
+		const bridge = new Bridge({ host, store: new MemoryBridgeStore() });
+		const transport = new FakeTransport();
+		await bridge.register(transport);
+
+		await transport.inject({ text: "hello" });
+		await transport.inject({ text: "000000" });
+
+		const text = sink.lines.join("\n");
+		expect(text).toContain("paired");
+		expect(text).toContain("fake:user-1");
+		expect(text).not.toContain("000000");
+	});
+
+	it("records a remote command by name", async () => {
+		const sink = new MemoryLogSink();
+		const host = new FakeHost();
+		host.logger = createLogger("test", sink, "debug");
+		const bridge = new Bridge({ host, config: { requirePairing: false } });
+		const transport = new FakeTransport();
+		await bridge.register(transport);
+
+		await transport.inject({ text: "/status" });
+
+		const text = sink.lines.join("\n");
+		expect(text).toContain("remote command");
+		expect(text).toContain("status");
 	});
 });
 

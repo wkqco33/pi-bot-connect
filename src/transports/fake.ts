@@ -53,6 +53,8 @@ export class FakeTransport implements Transport {
 	started = false;
 	/** Simulates an edit the platform rejects: deleted message, rate limit, ... */
 	failEdits = false;
+	/** Simulates a platform-wide send failure: 5xx, rate limit after retries, ... */
+	failSends = false;
 	/** Only defined when `attachmentResolver` was provided. */
 	readonly fetchAttachment?: (attachment: InboundAttachment) => Promise<FetchedAttachment>;
 	/** Channels the bridge asked to show a typing indicator for. */
@@ -89,6 +91,13 @@ export class FakeTransport implements Transport {
 	}
 
 	async send(message: OutboundMessage): Promise<SendReceipt> {
+		// Contract: sending before start must fail loudly, not silently succeed.
+		if (!this.started) {
+			throw new Error(`${this.id} transport is not started`);
+		}
+		if (this.failSends) {
+			throw new Error(`${this.id} rejected the send`);
+		}
 		if (message.editKey !== undefined && this.failEdits) {
 			throw new Error(`${this.id} rejected the edit`);
 		}

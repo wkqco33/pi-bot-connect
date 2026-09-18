@@ -16,6 +16,7 @@
 ┌────────────────────── src/core/* (완전 순수: pi도 네트워크도 모른다) ───────────────────────┐
 │  types · router · commands · pairing · chunk · markdown-blocks                 │
 │  markdown · redact · digest · message · work · text · notices · logger         │
+│  tool-policy (원격 턴 도구 제한) · rate-limit · todo · transcript              │
 └────────────────────────────────────────────────────────────────────────────────┘
                                         │
 ┌──────────────── src/transports/* (유일한 I/O 경계) ─────────────────────────────────┐
@@ -64,7 +65,7 @@ interface Transport {
 5. **`start()`는 백그라운드 리소스를 만들고, `stop()`은 그것을 정리한다.** `stop()`은 두 번 불려도 안전해야 한다.
 6. **재연결/백오프는 어댑터 책임이다.** 코어는 재시도를 하지 않는다.
 7. **첨부를 지원하려면 `fetchAttachment`를 구현해야 한다.** `capabilities.attachments: true`는 운반 가능 선언일 뿐이고, 실제 전달 여부는 브리지가 두 capability를 AND해서 결정한다. `mediaType`은 **선언값이 아니라 응답이 실제로 준 content type**을 보고해야 한다.
-8. **conformance 테스트를 통과한다** (아래 5장).
+8. **conformance 테스트를 통과한다** (`src/transports/transport-contract.test.ts`, 아래 5장).
 9. **진행 표시를 지원하려면 `typing()`을 구현한다.** 선택 멤버다. 브리지는 실패를 삼키고(베스트 에포트), 어댑터 스스로 호출 빈도를 제한해야 한다. `typing()`이 없으면 아무 일도 일어나지 않아야 한다.
 
 ### 2.3 capability 예시
@@ -73,7 +74,7 @@ interface Transport {
 | --- | --- | --- | --- | --- | --- |
 | fake | 4000 | chars | markdown | false | false |
 | discord | 2000 | utf16 | markdown | false | true |
-| telegram | 4096 | bytes | html | false | true |
+| telegram | 4096 | bytes | html | true | true |
 | slack | 4000 | chars | mrkdwn | true | true |
 
 `lengthUnit`은 플랫폼이 길이를 세는 방식이다: `chars`는 code point, `utf16`은 UTF-16 code unit, `bytes`는 UTF-8 바이트. **Discord는 code unit을 세므로 이모지 하나가 2000자 중 2를 먹는다** — `chars`로 선언하면 이모지가 많은 답변이 플랫폼 한도를 넘긴다.
@@ -117,6 +118,19 @@ Discord는 스레드에서 `channel_id`가 스레드 자체의 id이므로 `conv
 | I27 | 펜스 자체가 한도를 넘지 않는 한 코드 펜스는 분할되지 않는다. | `markdown-blocks.test.ts` |
 | I28 | 한도를 넘는 펜스는 조각마다 여는/닫는 펜스를 다시 붙여 각 메시지가 그 자체로 유효한 코드 블록이 되게 한다. | `markdown-blocks.test.ts` |
 | I29 | 줄바꿈은 `\r`과 `\n` 사이에서 잘리지 않는다(CRLF가 두 메시지로 갈라지지 않는다). | `chunk.test.ts` |
+| I30 | 송신 실패는 격리된다. 한 메시지/한 대화가 거부되어도 턴과 나머지 브로드캐스트는 계속되고, 실패는 메타데이터로만 로그에 남는다. | `bridge.test.ts` |
+| I31 | 게이트웨이는 매 연결마다 HELLO/READY 데드라인을 다시 건다(재연결 무한 대기 금지). RESUME 성공(`RESUMED`)은 ready로 복귀하고 재연결 예산을 리셋한다. | `gateway.test.ts` |
+| I32 | HTTP와 첨부 다운로드에는 요청별 타임아웃이 있고, 5xx·네트워크 오류는 백오프로 재시도하되 4xx는 재시도하지 않는다. | `rest.test.ts`, `discord/index.test.ts` |
+| I33 | 페어링 시도는 코드 길이와 정확히 일치하는 숫자열만 소모시킨다(잡담이 코드를 잠그지 않는다). | `pairing.test.ts` |
+| I34 | 메신저에서 시작된 턴에만 `remoteToolPolicy`가 적용된다. 로컬 턴의 도구 집합은 바뀌지 않는다. | `tool-policy.test.ts`, `index.test.ts` |
+| I35 | `broadcast`가 꺼진 종류는 자동 전송하지 않는다(진행 카드/최종 답변). 명시적 `/connect digest`는 항상 전송한다. | `bridge.test.ts` |
+| I36 | 리댁션 로그에는 규칙 이름만 남고 매치된 비밀값은 남지 않는다. | `bridge.test.ts` |
+| I37 | 원격 입력은 신원별 토큰 버킷으로 제한된다. 프롬프트와 명령은 별도 버킷이며, 초과 시 안내는 분당 1회만 보낸다. | `rate-limit.test.ts`, `bridge.test.ts` |
+| I38 | 페어링·해제·원격 명령은 `transport`/`identity`/이름 메타데이터로 감사 로그에 남는다(본문·인자 제외). | `bridge.test.ts` |
+| I39 | `remoteToolApproval: "each"`이면 정책이 허용한 원격 도구도 로컬 확인을 받고, 거절되면 실행되지 않는다. 로컬 턴은 확인을 받지 않는다. | `tool-policy.test.ts`, `index.test.ts` |
+| I40 | Telegram 업데이트는 순수 정규화를 거치며, 봇 자신/다른 봇 메시지와 다른 봇을 향한 명령은 무시한다. | `telegram/normalize.test.ts` |
+| I41 | 모든 전송은 conformance 키트를 통과한다(시작 전 send 거부, stop 멱등, 실패 표면화, editKey 편집, 미지원 threadId 수용, 토큰 비노출). | `transport-contract.test.ts` |
+| I42 | transcript 기록은 리댁션을 거치고 `raw` 플랫폼 payload를 버린다. 재생 시 잘못된 줄은 경고와 함께 무시한다. | `transcript.test.ts`, `replay.test.ts` |
 
 ---
 
@@ -126,11 +140,11 @@ Discord는 스레드에서 `channel_id`가 스레드 자체의 id이므로 `conv
 
 | 계층 | 방식 | 현재 |
 | --- | --- | --- |
-| `core/*` | 순수 함수 단위 테스트. 결정적 rng/clock 주입 | 238 테스트 |
-| `bridge.ts` | `FakeTransport` + `FakeHost`로 전 구간 시나리오 | 59 테스트 |
-| `config.ts` | 신뢰할 수 없는 JSON 검증 테이블 테스트 | 30 테스트 |
+| `core/*` | 순수 함수 단위 테스트. 결정적 rng/clock 주입 | 288 테스트 |
+| `bridge.ts` | `FakeTransport` + `FakeHost`로 전 구간 시나리오 | 74 테스트 |
+| `config.ts` | 신뢰할 수 없는 JSON 검증 테이블 테스트 | 38 테스트 |
 | `index.ts` | 타입체크 + 배선 테스트(가짜 `ExtensionAPI`로 팩토리 구동). **커버리지 제외** | 36 테스트 |
-| `transports/*` | 계약 conformance + 플랫폼별 payload fixture | 86 테스트 |
+| `transports/*` | 계약 conformance + 플랫폼별 payload fixture | 150+ 테스트 |
 
 ### 4.2 결정성 확보 방법
 
@@ -246,6 +260,16 @@ const decision = decidePairing({ ..., now: 10, random: digitSequence("987654") }
       "maxCount": 4,                 // 1 ~ 10
       "maxBytes": 8388608            // 1024 ~ 52428800
     },
+    // 메신저에서 시작된 턴의 도구 정책. "unrestricted" | "read-only" | "no-tools"
+    // 로컬에서 입력한 턴에는 적용되지 않는다.
+    "remoteToolPolicy": "unrestricted",
+    // 정책이 허용한 원격 도구도 로컬에서 확인받는다. "off" | "each"
+    "remoteToolApproval": "off",
+    // 신원별 원격 입력 제한. 0이면 비활성. 프롬프트/명령은 별도 버킷이다.
+    "rateLimit": { "promptsPerMinute": 30, "commandsPerMinute": 60 },
+    // 자동 브로드캐스트 정책. `progress`는 진행 카드, `replies`는 최종 답변.
+    // 명시적 `/connect digest`는 이 설정과 무관하게 전송된다.
+    "broadcast": { "progress": true, "replies": true },
     "progressMinIntervalMs": 1000,     // 0 ~ 60000. 턴 안에서 진행 카드 갱신 최소 간격
     "maxChunks": 8                     // 1 ~ 50. 한 번의 송신이 만들 수 있는 최대 메시지 수. 초과분은 잘렸다고 알린다
   },
@@ -277,7 +301,7 @@ const decision = decidePairing({ ..., now: 10, random: digitSequence("987654") }
 | 코드 유출 | 코드는 메신저로 전송되지 않는다. TTL + 시도 횟수 제한 |
 | 대화 내용 | 송신 전 리댁션. 툴 인자/출력은 전송하지 않음 |
 | 채널 오작동 | `requireAddressing` 기본 true. 미인증 메시지는 무응답 |
-| 프롬프트 인젝션 | (미해결) 메신저 텍스트는 신뢰할 수 없는 입력으로 취급해야 한다 — §9 참조 |
+| 프롬프트 인젝션 | 메신저 텍스트는 신뢰할 수 없는 입력이다. `remoteToolPolicy`가 원격 턴의 도구 집합을 제한하고, `remoteToolApproval: "each"`면 로컬 터미널에서 매 호출을 확인받는다 |
 
 **신뢰 경계**: 메신저는 신뢰 경계 밖이다. E2E 암호화 없음. 이 사실을 README와 `docs/`에 유지한다.
 
@@ -287,11 +311,11 @@ const decision = decidePairing({ ..., now: 10, random: digitSequence("987654") }
 
 | # | 과제 | 설명 |
 | --- | --- | --- |
-| G1 | 프롬프트 인젝션 | 메신저로 들어온 텍스트가 로컬 파일을 읽어 밖으로 보내도록 지시할 수 있다. 도구 정책/승인 게이트가 필요 (v2) |
+| G1 | ~~프롬프트 인젝션~~ | ✅ 완료 — `remoteToolPolicy`가 원격 턴의 도구를 제한하고, `remoteToolApproval: "each"`가 로컬 확인을 받는다(`core/tool-policy.ts`) |
 | G2 | 맥락 병합의 정의 | 원격 턴을 로컬 TUI에 어떻게 "보이게" 할지. `pi.appendEntry` + `registerEntryRenderer` 후보 |
-| G3 | 다중 세션 | 단일 봇 + 다중 세션 라우팅은 브로커가 필요 (v2) |
+| G3 | 다중 세션 | 단일 봇 + 다중 세션 라우팅은 별도 브로커 프로세스가 필요. 설계 미정 (v4) |
 | G4 | ~~진행 상황 편집~~ | ✅ 완료 — `Bridge.publishProgress`가 턴당 카드 1개를 스로틀·편집하고, 실패 시 새 메시지로 폴백 |
-| G5 | 리플레이 하네스 | 엔벨로프 record/replay로 회귀 테스트 |
+| G5 | ~~리플레이 하네스~~ | ✅ 완료 — `core/transcript.ts` + `transports/replay.ts`. 기록은 리댁션·`raw` 제거 |
 | G6 | ~~단일 인스턴스 락~~ | ✅ 완료 — `src/lock.ts`. O_EXCL 획득, 생존/만료 회수, 토큰 검증 해제 |
 | G7 | 세션 복원 | ✅ 완료 — `FileBridgeStore`가 세션 id로 스코프해 `pi --continue`에서 신뢰가 유지된다 |
 | G8 | ~~첨부(이미지) 전달~~ | ✅ 완료 — `Transport.fetchAttachment` + `bridge.attachmentPolicy`가 두 capability를 AND |

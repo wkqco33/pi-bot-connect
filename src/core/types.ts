@@ -6,6 +6,8 @@
  * I/O lives in `src/transports/` and the pi adapter (`src/index.ts`).
  */
 
+import type { RemoteToolApproval, RemoteToolPolicy } from "./tool-policy.js";
+
 export type LogMetaValue = string | number | boolean | null | undefined;
 export type LogMeta = Record<string, LogMetaValue | readonly LogMetaValue[]>;
 
@@ -194,8 +196,34 @@ export interface BridgeConfig {
 		readonly maxCount: number;
 		readonly maxBytes: number;
 	};
+	/**
+	 * What the bridge pushes to paired chats on its own. `progress` covers the
+	 * thinking/tool card; `replies` covers the final answer of every turn. An
+	 * explicit `/connect digest` is always delivered.
+	 */
+	readonly broadcast: {
+		readonly progress: boolean;
+		readonly replies: boolean;
+	};
+	/**
+	 * Per-identity token bucket for remote input. `0` disables the limit.
+	 * Commands and prompts have separate budgets so a throttled prompt burst
+	 * cannot lock the user out of `/status` or `/resume`.
+	 */
+	readonly rateLimit: {
+		readonly promptsPerMinute: number;
+		readonly commandsPerMinute: number;
+	};
 	/** Minimum gap between progress updates within a turn. */
 	readonly progressMinIntervalMs: number;
+	/**
+	 * Tool access for turns started by a messenger (G1: prompt-injection defense).
+	 * `unrestricted` keeps the current behavior; `read-only` allows inspection
+	 * tools only; `no-tools` blocks all tool use on remote turns.
+	 */
+	readonly remoteToolPolicy: RemoteToolPolicy;
+	/** When `each`, every allowed remote tool call needs a local confirmation. */
+	readonly remoteToolApproval: RemoteToolApproval;
 	/**
 	 * Maximum messages one outbound body may become. Larger bodies are cut off
 	 * with a truncation notice instead of flooding the chat.
@@ -219,7 +247,11 @@ export const DEFAULT_CONFIG: BridgeConfig = {
 		maxCount: 4,
 		maxBytes: 8 * 1024 * 1024,
 	},
+	broadcast: { progress: true, replies: true },
+	rateLimit: { promptsPerMinute: 30, commandsPerMinute: 60 },
 	progressMinIntervalMs: 1000,
+	remoteToolPolicy: "unrestricted",
+	remoteToolApproval: "off",
 	maxChunks: 8,
 };
 
@@ -229,6 +261,8 @@ export function resolveConfig(overrides: Partial<BridgeConfig> = {}): BridgeConf
 		...overrides,
 		digest: { ...DEFAULT_CONFIG.digest, ...overrides.digest },
 		attachments: { ...DEFAULT_CONFIG.attachments, ...overrides.attachments },
+		broadcast: { ...DEFAULT_CONFIG.broadcast, ...overrides.broadcast },
+		rateLimit: { ...DEFAULT_CONFIG.rateLimit, ...overrides.rateLimit },
 	};
 }
 

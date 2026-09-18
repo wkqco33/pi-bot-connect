@@ -183,6 +183,8 @@ export class FakeRest implements DiscordApi {
 	identity: DiscordBotIdentity = { id: "bot-1", username: "pi-bot" };
 	gatewayUrl = "wss://gateway.example";
 	identityError: Error | null = null;
+	/** When set, create/edit reject, simulating a platform send failure. */
+	sendError: Error | null = null;
 	readonly created: Array<{ channelId: string; content: string }> = [];
 	readonly edited: Array<{ channelId: string; messageId: string; content: string }> = [];
 	readonly typings: string[] = [];
@@ -199,11 +201,13 @@ export class FakeRest implements DiscordApi {
 	}
 
 	createMessage(channelId: string, content: string): Promise<{ id: string }> {
+		if (this.sendError !== null) return Promise.reject(this.sendError);
 		this.created.push({ channelId, content });
 		return Promise.resolve({ id: `msg-${this.created.length}` });
 	}
 
 	editMessage(channelId: string, messageId: string, content: string): Promise<void> {
+		if (this.sendError !== null) return Promise.reject(this.sendError);
 		this.edited.push({ channelId, messageId, content });
 		return Promise.resolve();
 	}

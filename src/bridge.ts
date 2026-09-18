@@ -17,12 +17,14 @@ import {
 	ATTACHMENT_TOO_LARGE_NOTICE,
 	ATTACHMENT_TOO_MANY_NOTICE,
 	PAUSED_NOTICE,
+	RATE_LIMITED_NOTICE,
 	truncatedNotice,
 	unknownCommandNotice,
 } from "./core/notices.js";
 import { isFreshChallenge, pairingCodeNotice, pairingPrompt, pairingSuccessPrompt, type PendingChallenge } from "./core/pairing.js";
 import { thinkingLabel } from "./core/progress.js";
-import { redactSecrets } from "./core/redact.js";
+import { takeToken, type RateLimitBucket, type RateLimitPolicy } from "./core/rate-limit.js";
+import { redactWithReport } from "./core/redact.js";
 import { route, type UnsupportedFeature } from "./core/router.js";
 import {
 	conversationKey,
@@ -176,6 +178,10 @@ export class Bridge {
 	private readonly startErrors = new Map<TransportId, string>();
 	/** Conversation key to the message id of the current turn's progress card. */
 	private readonly progressKeys = new Map<string, string>();
+	/** Per-identity token buckets for remote input. */
+	private readonly rateBuckets = new Map<string, RateLimitBucket>();
+	/** Last time a rate-limit notice was sent, keyed by identity:transport. */
+	private readonly rateNoticeAt = new Map<string, number>();
 	private lastProgressAt = Number.NEGATIVE_INFINITY;
 
 	constructor(options: BridgeOptions) {
@@ -282,6 +288,33 @@ export class Bridge {
 		return this.store.isTrusted(identity);
 	}
 
+	/** Pure token-bucket check; `null` policy means the limit is disabled. */
+	private rateLimitPolicy(kind: "prompt" | "command"): RateLimitPolicy | null {
+		const perMinute = kind === "prompt" ? this.config.rateLimit.promptsPerMinute : this.config.rateLimit.commandsPerMinute;
+		if (!Number.isFinite(perMinute) || perMinute <= 0) return null;
+		return { capacity: perMinute, refillPerMs: perMinute / 60_000 };
+	}
+
+	private allowRequest(kind: "prompt" | "command", identity: string): boolean {
+		const policy = this.rateLimitPolicy(kind);
+		if (policy === null) return true;
+		const key = `${kind}:${identity}`;
+		const decision = takeToken(this.rateBuckets.get(key), this.host.now(), policy);
+		this.rateBuckets.set(key, decision.bucket);
+		if (!decision.allowed) this.host.logger.warn("remote input rate limited", { kind, identity });
+		return decision.allowed;
+	}
+
+	/** Tells the user once per minute; repeated notices would amplify the flood. */
+	private async replyRateLimited(envelope: Envelope, identity: string): Promise<void> {
+		const key = `${envelope.transport}:${identity}`;
+		const now = this.host.now();
+		const last = this.rateNoticeAt.get(key);
+		if (last !== undefined && now - last < 60_000) return;
+		this.rateNoticeAt.set(key, now);
+		await this.reply(envelope, RATE_LIMITED_NOTICE);
+	}
+
 	private async applyAction(
 		action: ReturnType<typeof route>[number],
 		envelope: Envelope,
@@ -297,6 +330,7 @@ export class Bridge {
 			this.store.trust(identity, this.host.now());
 			this.store.setPending(key, undefined);
 			this.remember(envelope);
+			this.host.logger.info("paired remote identity", { transport: envelope.transport, identity });
 			this.host.notify(`Paired ${identity}`, "info");
 			await this.reply(envelope, pairingSuccessPrompt(identity, this.config.localCommand));
 			return;
@@ -327,12 +361,21 @@ export class Bridge {
 		}
 
 		if (action.type === "command") {
+			if (!this.allowRequest("command", identity)) {
+				await this.replyRateLimited(envelope, identity);
+				return;
+			}
 			await this.runCommand(action.name, action.args, envelope, identity, key);
 			return;
 		}
 
 		if (this.store.isPaused(key)) {
 			await this.reply(envelope, PAUSED_NOTICE);
+			return;
+		}
+
+		if (!this.allowRequest("prompt", identity)) {
+			await this.replyRateLimited(envelope, identity);
 			return;
 		}
 
@@ -425,6 +468,12 @@ export class Bridge {
 			await this.reply(envelope, unknownCommandNotice(name));
 			return;
 		}
+		// Audit by name and identity only: command arguments are never logged.
+		this.host.logger.info("remote command", {
+			transport: envelope.transport,
+			identity,
+			command: name,
+		});
 
 		const effect = result.effect;
 		if (effect?.type === "pause") this.store.setPaused(key, true);
@@ -434,6 +483,7 @@ export class Bridge {
 			this.store.revoke(identity);
 			this.store.setPaused(key, false);
 			this.store.setPending(key, undefined);
+			this.host.logger.info("revoked remote pairing", { transport: envelope.transport, identity });
 		}
 
 		await this.reply(envelope, result.text);
@@ -460,6 +510,22 @@ export class Bridge {
 
 	/** Sends text to one conversation, rendering and chunking for that transport. */
 	async send(request: SendRequest): Promise<SendReceipt | null> {
+		try {
+			return await this.deliver(request);
+		} catch (error) {
+			// Outbound failure is isolated here: one rejected message (rate limit after
+			// retries, 5xx, deleted channel) must not abort the turn or the broadcast.
+			this.host.logger.warn("outbound send failed", {
+				transport: request.transport,
+				kind: request.kind,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return null;
+		}
+	}
+
+	/** The throwing primitive. Callers that need the rejection use this. */
+	private async deliver(request: SendRequest): Promise<SendReceipt | null> {
 		const transport = this.transports.get(request.transport);
 		if (!transport) {
 			this.host.logger.warn("cannot send: transport not registered", { transport: request.transport });
@@ -471,8 +537,17 @@ export class Bridge {
 		// transports that rewrite headings (`<b>`, `*`) would hide them. The
 		// limit-safe chunker then stays the hard guarantee for whatever rendering
 		// does to the size (html escaping grows, mrkdwn links shrink).
+		const redaction = redactWithReport(request.text);
+		if (redaction.hits.length > 0) {
+			// Rule names only: logging the match would defeat the redaction.
+			this.host.logger.info("redacted outbound text", {
+				transport: request.transport,
+				kind: request.kind,
+				rules: redaction.hits.join(","),
+			});
+		}
 		const budget = capChunkCount(
-			chunkMarkdown(redactSecrets(request.text), {
+			chunkMarkdown(redaction.text, {
 				maxLength: capabilities.maxMessageLength,
 				unit: capabilities.lengthUnit,
 			}).flatMap((piece) => chunkForTransport(renderMarkdown(piece, capabilities.markdown), capabilities)),
@@ -525,6 +600,7 @@ export class Bridge {
 	 * same card.
 	 */
 	async publishTurnStart(): Promise<number> {
+		if (!this.config.broadcast.progress) return 0;
 		const delivered = await this.publishProgressToConversations(thinkingLabel());
 		this.lastProgressAt = Number.NEGATIVE_INFINITY;
 		return delivered;
@@ -536,6 +612,7 @@ export class Bridge {
 	 * chat message per tool call.
 	 */
 	async publishProgress(text: string): Promise<number> {
+		if (!this.config.broadcast.progress) return 0;
 		const now = this.host.now();
 		if (now - this.lastProgressAt < this.config.progressMinIntervalMs) return 0;
 		this.lastProgressAt = now;
@@ -550,8 +627,7 @@ export class Bridge {
 			const transport = this.transports.get(target.transport);
 			if (!transport) continue;
 			await this.notifyTyping(target);
-			await this.sendProgress(target, transport, text);
-			delivered++;
+			if (await this.sendProgress(target, transport, text)) delivered++;
 		}
 		return delivered;
 	}
@@ -571,14 +647,14 @@ export class Bridge {
 		}
 	}
 
-	private async sendProgress(target: ConversationTarget, transport: Transport, text: string): Promise<void> {
+	private async sendProgress(target: ConversationTarget, transport: Transport, text: string): Promise<boolean> {
 		const key = `${target.transport}:${target.conversationId}`;
 		const editKey = this.progressKeys.get(key);
 
 		if (editKey !== undefined && transport.capabilities.edit) {
 			try {
-				await this.send({ ...target, kind: "progress", text, editKey });
-				return;
+				await this.deliver({ ...target, kind: "progress", text, editKey });
+				return true;
 			} catch (error) {
 				// The message may have been deleted, or the edit may be rate limited.
 				this.host.logger.debug("progress edit failed, posting a new message", { error: String(error) });
@@ -587,18 +663,22 @@ export class Bridge {
 		}
 
 		const receipt = await this.send({ ...target, kind: "progress", text });
-		if (receipt?.editKey !== undefined) this.progressKeys.set(key, receipt.editKey);
+		if (receipt === null) return false;
+		if (receipt.editKey !== undefined) this.progressKeys.set(key, receipt.editKey);
+		return true;
 	}
 
 	/** Sends a progress update to every remembered, non-paused conversation. */
 	async publish(kind: OutboundKind, text: string): Promise<number> {
+		// An explicit digest is a user action and is always delivered; the turn's
+		// final answer is background noise a shared channel may want to suppress.
+		if (kind === "reply" && !this.config.broadcast.replies) return 0;
 		let delivered = 0;
 		for (const target of this.store.listConversations()) {
 			const key = `${target.transport}:${target.conversationId}`;
 			if (this.store.isPaused(key)) continue;
 			if (!this.transports.has(target.transport)) continue;
-			await this.send({ ...target, kind, text });
-			delivered++;
+			if ((await this.send({ ...target, kind, text })) !== null) delivered++;
 		}
 		return delivered;
 	}

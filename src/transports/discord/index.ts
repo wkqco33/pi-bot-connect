@@ -28,6 +28,9 @@ import { DiscordRest, type DiscordApi } from "./rest.js";
 /** Discord's own CDN limit for a bot upload; used as the default download cap. */
 export const DEFAULT_MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 
+/** Per-download deadline. A signed CDN URL that stalls must not stall a turn. */
+export const DEFAULT_ATTACHMENT_TIMEOUT_MS = 20_000;
+
 /**
  * How often one channel may be told "typing". Discord expires the indicator
  * after ~10 seconds and rate-limits the endpoint, so hints are throttled below
@@ -61,6 +64,8 @@ export interface DiscordTransportOptions {
 	readonly lockStaleMs?: number;
 	/** Cap for a downloaded attachment. Discord's own CDN limit is 25 MB. */
 	readonly maxAttachmentBytes?: number;
+	/** Per-download deadline; aborts a CDN request that never completes. */
+	readonly attachmentTimeoutMs?: number;
 	readonly fetchImpl?: typeof fetch;
 	/** Minimum gap between typing hints for the same channel. */
 	readonly typingMinIntervalMs?: number;
@@ -77,6 +82,7 @@ export class DiscordTransport implements Transport {
 	private readonly scheduler: GatewayScheduler;
 	private readonly fetchImpl: typeof fetch;
 	private readonly maxAttachmentBytes: number;
+	private readonly attachmentTimeoutMs: number;
 	private readonly typingMinIntervalMs: number;
 	private readonly now: () => number;
 	/** Last time each channel was told "typing", keyed by channel id. */
@@ -98,6 +104,7 @@ export class DiscordTransport implements Transport {
 		this.scheduler = options.scheduler ?? systemScheduler;
 		this.fetchImpl = options.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
 		this.maxAttachmentBytes = options.maxAttachmentBytes ?? DEFAULT_MAX_ATTACHMENT_BYTES;
+		this.attachmentTimeoutMs = options.attachmentTimeoutMs ?? DEFAULT_ATTACHMENT_TIMEOUT_MS;
 		this.typingMinIntervalMs = options.typingMinIntervalMs ?? DEFAULT_TYPING_MIN_INTERVAL_MS;
 		this.now = options.now ?? Date.now;
 	}
@@ -180,7 +187,7 @@ export class DiscordTransport implements Transport {
 	async fetchAttachment(attachment: InboundAttachment): Promise<FetchedAttachment> {
 		let response: Response;
 		try {
-			response = await this.fetchImpl(attachment.ref);
+			response = await this.fetchImpl(attachment.ref, { signal: AbortSignal.timeout(this.attachmentTimeoutMs) });
 		} catch (error) {
 			throw new Error(`could not reach the attachment host: ${String(error)}`);
 		}

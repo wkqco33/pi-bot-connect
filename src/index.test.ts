@@ -19,6 +19,7 @@ import botConnect from "./index.js";
 interface FakeUi {
 	notify(text: string, level?: string): void;
 	setStatus(key: string, text: string | undefined): void;
+	confirm(title: string, message: string): Promise<boolean>;
 }
 
 class FakeCtx {
@@ -28,6 +29,9 @@ class FakeCtx {
 	readonly sessionManager: { getSessionId(): string; getSessionFile(): string | null };
 	idle = true;
 	aborts = 0;
+	/** Answer returned by `ui.confirm`. */
+	confirmResult = true;
+	readonly confirmCalls: Array<{ title: string; message: string }> = [];
 
 	constructor(cwd: string, sessionId = "session-a") {
 		this.cwd = cwd;
@@ -41,6 +45,10 @@ class FakeCtx {
 			},
 			setStatus: (key, text) => {
 				this.statuses.set(key, text);
+			},
+			confirm: (title, message) => {
+				this.confirmCalls.push({ title, message });
+				return Promise.resolve(this.confirmResult);
 			},
 		};
 	}
@@ -109,10 +117,12 @@ class FakePi {
 		return Promise.resolve({ stdout: "", stderr: "not a git repository", code: 128, killed: false });
 	}
 
-	async emit(event: string, payload: Record<string, unknown>, ctx: FakeCtx): Promise<void> {
+	async emit(event: string, payload: Record<string, unknown>, ctx: FakeCtx): Promise<unknown[]> {
+		const results: unknown[] = [];
 		for (const handler of this.handlers.get(event) ?? []) {
-			await handler(payload, ctx);
+			results.push(await handler(payload, ctx));
 		}
+		return results;
 	}
 
 	async run(args: string, ctx: FakeCtx): Promise<void> {
@@ -136,9 +146,11 @@ const cleanups: Array<() => Promise<void>> = [];
  * network/lock timing instead of on the code under test.
  */
 const originalDiscordToken = process.env.PI_DISCORD_TOKEN;
+const originalTelegramToken = process.env.PI_TELEGRAM_TOKEN;
 
 beforeEach(async () => {
 	delete process.env.PI_DISCORD_TOKEN;
+	delete process.env.PI_TELEGRAM_TOKEN;
 	dir = await mkdtemp(join(tmpdir(), "bot-connect-test-"));
 	configPath = join(dir, "config.json");
 	stateFile = join(dir, "state.json");
@@ -154,6 +166,8 @@ afterEach(async () => {
 	delete process.env.PI_BOT_CONNECT_STATE;
 	if (originalDiscordToken === undefined) delete process.env.PI_DISCORD_TOKEN;
 	else process.env.PI_DISCORD_TOKEN = originalDiscordToken;
+	if (originalTelegramToken === undefined) delete process.env.PI_TELEGRAM_TOKEN;
+	else process.env.PI_TELEGRAM_TOKEN = originalTelegramToken;
 	await rm(dir, { recursive: true, force: true });
 });
 
@@ -217,6 +231,8 @@ describe("adapter — registration", () => {
 			"tool_execution_end",
 			"message_end",
 			"agent_settled",
+			"tool_call",
+			"input",
 		]) {
 			expect(pi.handlers.has(event), `missing handler for ${event}`).toBe(true);
 		}
@@ -488,5 +504,128 @@ describe("adapter — digest sources", () => {
 		expect(ctx.lastNotification).toContain("No paired conversation");
 		expect(ctx.lastNotification).toContain("### wiring-session — idle");
 		expect(ctx.lastNotification).toContain("branch `main`");
+	});
+});
+
+describe("adapter — remote tool policy (G1)", () => {
+	it("blocks every tool on a messenger-originated turn under no-tools", async () => {
+		const { pi, ctx } = await start({ bridge: { remoteToolPolicy: "no-tools" } });
+		await pi.emit("input", { source: "extension", text: "delete everything" }, ctx);
+
+		const [result] = await pi.emit("tool_call", { toolCallId: "t1", toolName: "bash", input: {} }, ctx);
+
+		expect(result).toMatchObject({ block: true });
+	});
+
+	it("allows a read-only tool on a remote turn under read-only", async () => {
+		const { pi, ctx } = await start({ bridge: { remoteToolPolicy: "read-only" } });
+		await pi.emit("input", { source: "extension", text: "what changed?" }, ctx);
+
+		const [result] = await pi.emit("tool_call", { toolCallId: "t1", toolName: "read", input: {} }, ctx);
+
+		expect(result).toBeUndefined();
+	});
+
+	it("blocks a mutating tool on a remote turn under read-only", async () => {
+		const { pi, ctx } = await start({ bridge: { remoteToolPolicy: "read-only" } });
+		await pi.emit("input", { source: "extension", text: "publish it" }, ctx);
+
+		const [result] = await pi.emit("tool_call", { toolCallId: "t1", toolName: "bash", input: {} }, ctx);
+
+		expect(result).toMatchObject({ block: true });
+	});
+
+	it("leaves a locally typed turn unrestricted", async () => {
+		const { pi, ctx } = await start({ bridge: { remoteToolPolicy: "no-tools" } });
+		await pi.emit("input", { source: "interactive", text: "run the tests" }, ctx);
+
+		const [result] = await pi.emit("tool_call", { toolCallId: "t1", toolName: "bash", input: {} }, ctx);
+
+		expect(result).toBeUndefined();
+	});
+
+	it("does not restrict a remote turn under the default policy", async () => {
+		const { pi, ctx } = await start();
+		await pi.emit("input", { source: "extension", text: "go" }, ctx);
+
+		const [result] = await pi.emit("tool_call", { toolCallId: "t1", toolName: "bash", input: {} }, ctx);
+
+		expect(result).toBeUndefined();
+	});
+
+	it("clears the remote flag when the turn settles", async () => {
+		const { pi, ctx } = await start({ bridge: { remoteToolPolicy: "no-tools" } });
+		await pi.emit("input", { source: "extension", text: "go" }, ctx);
+		await pi.emit("agent_settled", {}, ctx);
+
+		const [result] = await pi.emit("tool_call", { toolCallId: "t1", toolName: "bash", input: {} }, ctx);
+
+		expect(result).toBeUndefined();
+	});
+});
+
+describe("adapter — remote tool approval (G1)", () => {
+	it("asks the operator before running an allowed remote tool", async () => {
+		const { pi, ctx } = await start({ bridge: { remoteToolApproval: "each" } });
+		await pi.emit("input", { source: "extension", text: "go" }, ctx);
+		ctx.confirmResult = true;
+
+		const [result] = await pi.emit("tool_call", { toolCallId: "t1", toolName: "bash", input: {} }, ctx);
+
+		expect(result).toBeUndefined();
+		expect(ctx.confirmCalls).toHaveLength(1);
+		expect(ctx.confirmCalls[0]?.title).toContain("bash");
+	});
+
+	it("blocks the tool when the operator declines", async () => {
+		const { pi, ctx } = await start({ bridge: { remoteToolApproval: "each" } });
+		await pi.emit("input", { source: "extension", text: "go" }, ctx);
+		ctx.confirmResult = false;
+
+		const [result] = await pi.emit("tool_call", { toolCallId: "t1", toolName: "bash", input: {} }, ctx);
+
+		expect(result).toMatchObject({ block: true });
+	});
+
+	it("does not ask the operator for a local turn", async () => {
+		const { pi, ctx } = await start({ bridge: { remoteToolApproval: "each" } });
+		await pi.emit("input", { source: "interactive", text: "go" }, ctx);
+
+		await pi.emit("tool_call", { toolCallId: "t1", toolName: "bash", input: {} }, ctx);
+
+		expect(ctx.confirmCalls).toHaveLength(0);
+	});
+
+	it("blocks without asking when the policy already forbids the tool", async () => {
+		const { pi, ctx } = await start({
+			bridge: { remoteToolPolicy: "no-tools", remoteToolApproval: "each" },
+		});
+		await pi.emit("input", { source: "extension", text: "go" }, ctx);
+
+		const [result] = await pi.emit("tool_call", { toolCallId: "t1", toolName: "bash", input: {} }, ctx);
+
+		expect(result).toMatchObject({ block: true });
+		expect(ctx.confirmCalls).toHaveLength(0);
+	});
+});
+
+describe("adapter — digest TODO source", () => {
+	it("includes the latest assistant checklist in the digest", async () => {
+		const { pi, ctx } = await start();
+		await pi.emit(
+			"message_end",
+			{
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "Progress:\n- [x] write tests\n- [ ] ship it" }],
+				},
+			},
+			ctx,
+		);
+
+		await pi.run("digest", ctx);
+
+		expect(ctx.lastNotification).toContain("Pending (1/2)");
+		expect(ctx.lastNotification).toContain("ship it");
 	});
 });

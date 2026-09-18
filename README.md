@@ -1,14 +1,14 @@
 # pi-bot-connect
 
-**pi 코딩 에이전트의 라이브 세션을 Discord에 연결하는 pi 확장.** (Telegram/Slack은 같은 코어 위에 추가 예정)
+**pi 코딩 에이전트의 라이브 세션을 Discord·Telegram에 연결하는 pi 확장.** (Slack은 같은 코어 위에 추가 예정)
 
 알림 봇이 아니다. **핸드오프 브리지**다.
 
-- 지금 하고 있는 일을 **공유**한다 — 브랜치, 변경 파일, TODO, 테스트 결과를 한 장의 작업 다이제스트로
+- 지금 하고 있는 일을 **공유**한다 — 브랜치, 변경 파일, 미완 TODO, 테스트 결과를 한 장의 작업 다이제스트로
 - 메신저에서 **다음 작업을 이어간다** — 원격 메시지가 같은 라이브 세션에 주입된다
 - 터미널로 돌아오면 그 작업이 **이미 세션에 반영되어 있다** — 세션을 뺏지 않는다
 
-> 상태: **Discord 사용 가능**. 코어·브리지·영속화·락·Discord 게이트웨이·이미지 전달·진행 카드·작업 다이제스트가 427개 테스트로 고정되어 있다. 봇 SDK(`discord.js` 등) 없이 구현했다.
+> 상태: **Discord·Telegram 사용 가능**. 코어·브리지·영속화·락·Discord 게이트웨이·이미지 전달·진행 카드·작업 다이제스트가 651개 테스트로 고정되어 있다. 봇 SDK(`discord.js` 등) 없이 구현했다.
 
 ---
 
@@ -31,9 +31,9 @@ pi -e ./src/index.ts          # 현재 디렉터리의 소스로 한 번만 실�
 > **0.x 버전이다.** 설정 스키마·원격 명령 집합·`Transport` 계약이 메이저 버전 없이
 > 바뀔 수 있다. 변경 내역은 [CHANGELOG.md](CHANGELOG.md).
 >
-> **실제 Discord API와의 왕복은 아직 검증되지 않았다.** 게이트웨이 상태머신·정규화·
-> 첨부 다운로드·락은 전부 가짜 소켓과 가짜 fetch로 테스트되어 있고(427개), 첫 실사용이
-> 진짜 통합 테스트다. 문제가 생기면 `/connect doctor`가 어느 단계인지 알려준다.
+> **실제 Discord API 왕복은 0.3.0에서 검증되었다** (텍스트·이미지 프롬프트, 진행 카드,
+> 긴 답변 분할). 게이트웨이 상태머신·정규화·첨부 다운로드·락은 전부 가짜 소켓과 가짜
+> fetch로 테스트되어 있고(651개), 실사용 중 문제가 생기면 `/connect doctor`가 어느 단계인지 알려준다.
 
 ---
 
@@ -43,7 +43,7 @@ pi -e ./src/index.ts          # 현재 디렉터리의 소스로 한 번만 실�
 | --- | --- |
 | pi | `>=0.85.0` (peer dependency) |
 | Node.js | `>=22.19.0` — pi의 요구사항이며 전역 `WebSocket`/`fetch`를 쓴다 |
-| 전송 | Discord만. Telegram·Slack은 같은 코어 위에 추가 예정 |
+| 전송 | Discord, Telegram. Slack은 같은 코어 위에 추가 예정 |
 | 모델 입력 | 텍스트 + 이미지 (PNG/JPEG/GIF/WebP, 최대 4장, 장당 8 MiB) |
 | 이미지가 아닌 첨부 | 거부한다 (조용히 버리지 않음) |
 | 다중 세션 | 세션당 1전송. 단일 봇 + 다중 세션 라우팅은 미구현 |
@@ -106,6 +106,29 @@ export PI_DISCORD_TOKEN="your-bot-token"
 
 섹션 경계를 지키느라 메시지 수가 최대 2배까지 늘 수 있고, 분할 상한은 `bridge.maxChunks`(기본 8, 최대 50)로 조절한다 — 상한을 넘으면 잘렸다고 알린다.
 
+메신저에서 시작된 턴의 **도구 사용은 정책으로 제한할 수 있다** (`bridge.remoteToolPolicy`):
+
+| 값 | 의미 |
+| --- | --- |
+| `unrestricted` (기본) | 제한 없음 — 로컬 턴과 동일 |
+| `read-only` | `read`/`grep`/`find`/`ls`만 허용, 셸·편집 차단 |
+| `no-tools` | 원격 턴에서는 모든 도구 차단 |
+
+로컬에서 직접 입력한 턴에는 전혀 적용되지 않는다. 채팅을 다른 사람과 공유한다면 `read-only` 이상을 권장한다.
+
+`remoteToolApproval: "each"`로 두면 정책이 허용한 원격 도구도 **로컬 터미널에서 한 번씩 확인**을 받는다. 기본값은 `off`(확인 없음)다.
+
+원격 입력에는 **rate limit**이 적용된다 (`bridge.rateLimit`): `promptsPerMinute`(기본 30), `commandsPerMinute`(기본 60), `0`이면 비활성. 프롬프트와 명령은 별도 버킷이라 폭주 중에도 `/status`·`/resume`는 동작한다.
+
+
+무엇을 스스로 채팅에 보낼지도 정할 수 있다 (`bridge.broadcast`):
+
+```json
+{ "bridge": { "broadcast": { "progress": true, "replies": false } } }
+```
+
+`progress`는 `thinking…`/툴 카드, `replies`는 턴 종료 시 최종 답변이다. `/connect digest`는 명시적 사용자 동작이므로 이 설정과 무관하게 항상 전송된다.
+
 ### 5. 시작하고 페어링
 
 ```bash
@@ -127,6 +150,41 @@ pi        # 또는 pi -e ./src/index.ts 로 개발 중인 버전 로드
 ```
 
 ---
+
+---
+
+## Telegram 설정
+
+Telegram은 privileged intent가 필요 없다. 절차가 더 짧다.
+
+### 1. 봇 만들기
+
+Telegram에서 [@BotFather](https://t.me/BotFather) → `/newbot` → 이름과 사용자명을 정한다. 표시된 토큰을 복사한다.
+
+### 2. 토큰을 환경변수로
+
+```bash
+export PI_TELEGRAM_TOKEN="123456:ABC-your-token"
+```
+
+### 3. 설정 파일
+
+```json
+{
+  "transports": {
+    "discord": { "enabled": true },
+    "telegram": { "enabled": true, "tokenEnv": "PI_TELEGRAM_TOKEN" }
+  }
+}
+```
+
+### 4. 시작하고 페어링
+
+1. Telegram에서 봇에게 **DM**을 보낸다 (그룹에서는 `@봇이름` 멘션 또는 봇 메시지에 답장)
+2. 터미널에 6자리 코드가 뜬다 → DM에 입력
+3. 이후 메시지가 같은 pi 세션의 프롬프트가 된다
+
+Telegram은 롱폴링을 쓴다. 같은 봇 토큰으로 두 프로세스가 폴링하면 Telegram이 409를 반환하므로, Discord와 동일하게 **단일 인스턴스 락**이 적용된다.
 
 ## 로컬 명령
 
@@ -158,7 +216,7 @@ pi        # 또는 pi -e ./src/index.ts 로 개발 중인 버전 로드
 | 턴 종료 | 어시스턴트 최종 답변 |
 | 이미지 전송 | 이미지가 그대로 모델에 전달된다. 여러 장 가능 |
 | 이미지가 아닌 파일 | "이미지만 전달할 수 있다"고 명시적으로 거부 (조용히 버리지 않음) |
-| `/connect digest` | 브랜치·변경 파일(+/-)·미해결 TODO·최근 테스트 결과·마지막 요청 |
+| `/connect digest` | 브랜치·변경 파일(+/-)·미완 TODO·최근 테스트 결과·마지막 요청 |
 
 ## 작업 다이제스트 예시
 
@@ -166,12 +224,16 @@ pi        # 또는 pi -e ./src/index.ts 로 개발 중인 버전 로드
 ### refactor-bridge — idle
 `/work/pi-bot-connect` · branch `feat/core`
 
+**Pending (1/2)**
+- [x] Telegram 전송
+- [ ] Slack 전송
+
 **Changes (3 files, +142/-37)**
 - `src/bridge.ts` +88/-21
 - `src/core/router.ts` +44/-16
 - `src/index.ts` +10/-0
 
-**Tests:** npm test — 427 passed
+**Tests:** npm test — 651 passed
 
 **Last request**
 > 이미지도 전달되게 해줘
@@ -187,11 +249,13 @@ Discord 게이트웨이 ──► normalize ──► Envelope ──► Bridge 
 Discord REST      ◄── chunk+markdown+redact ◄──────┘
 ```
 
-- `src/core/` — **완전 순수**. pi도 네트워크도 모른다. 라우팅·페어링·리댁션·구조 인식 분할·청킹·마크다운·다이제스트
+- `src/core/` — **완전 순수**. pi도 네트워크도 모른다. 라우팅·페어링·리댁션·구조 인식 분할·청킹·마크다운·다이제스트·도구 정책·rate limit·TODO 추출·transcript
 - `src/bridge.ts` — 오케스트레이션. 송신 파이프라인과 인증 판정
 - `src/file-store.ts` — 신뢰 상태 영속화 (`/reload`·재시작에도 페어링 유지, 세션별 격리)
 - `src/lock.ts` — 봇 자격증명당 단일 인스턴스 락
 - `src/transports/discord/` — normalize(순수) / gateway(주입 가능한 소켓) / rest / 전송 본체
+- `src/transports/telegram/` — normalize(순수) / rest / 롱폴링 전송 본체
+- `src/transports/transport-contract.test.ts` — 새 어댑터가 통과해야 하는 공유 conformance 키트
 
 자세히: [`docs/architecture.md`](docs/architecture.md)
 
@@ -209,9 +273,12 @@ Discord REST      ◄── chunk+markdown+redact ◄──────┘
 - **봇 자신과 다른 봇의 메시지는 무시한다** (무한 루프 방지)
 - 첨부는 **이미지만** 전달한다. 호스트와 전송이 **둘 다** 지원할 때만이고, 미디어 타입·개수·크기를 정책으로 검사한다. 타입은 선언값이 아니라 응답이 실제로 준 content type으로 재검사한다
 - 채널에서는 봇을 명시적으로 호출(멘션·답장·접두사)할 때만 반응한다. 인증 전에도 같아서 미인증 잡담에는 응답하지 않는다 (기본 켜짐)
+- **프롬프트 인젝션 방어**: 메신저에서 시작된 턴의 도구 사용은 `bridge.remoteToolPolicy`로 제한하고, `remoteToolApproval: "each"`면 로컬 터미널에서 매 호출을 확인받는다. 로컬에서 입력한 턴에는 적용되지 않는다
+- **원격 입력 rate limit**: 신원별 토큰 버킷으로 프롬프트/명령 폭주를 제한한다
+- **감사 로그**: 페어링·해제·원격 명령을 `transport`/`identity`/이름 메타데이터로만 기록한다 (본문·인자 제외)
 - 크기는 선언값을 믿지 않는다. 다운로드한 실제 바이트로 다시 검사한다
 - 모델에게 없는 첨부를 보라고 하지 않는다. 전달할 수 없으면 명시적으로 거부한다
-- 알려진 미해결: 프롬프트 인젝션 방어 (도구 정책/승인 게이트)
+- 원격 턴 도구 정책으로 프롬프트 인젝션을 제한한다 (`bridge.remoteToolPolicy`, 기본 unrestricted)
 
 ### Discord 게이트웨이와 동시 실행
 
@@ -239,6 +306,7 @@ PI_BOT_CONNECT_DEBUG=1 pi -e ./src/index.ts
 | 변수 | 용도 |
 | --- | --- |
 | `PI_DISCORD_TOKEN` | Discord 봇 토큰 (설정으로 이름 변경 가능) |
+| `PI_TELEGRAM_TOKEN` | Telegram 봇 토큰 (설정으로 이름 변경 가능) |
 | `PI_BOT_CONNECT_DEBUG` | `1`이면 어댑터 로그 활성화 |
 | `PI_BOT_CONNECT_CONFIG` | 설정 파일 경로 강제 (테스트/CI용) |
 | `PI_BOT_CONNECT_STATE` | 상태 파일 경로 강제 (테스트/CI용) |
@@ -252,7 +320,8 @@ PI_BOT_CONNECT_DEBUG=1 pi -e ./src/index.ts
 | **v0** ✅ | 순수 코어, 브리지, 설정 검증, 영속화, 락, pi 어댑터 |
 | **v1** ✅ | Discord 게이트웨이 전송 + 단일 인스턴스 락 + `/connect doctor` |
 | **v2** ✅ | 이미지 전달, 진행 카드 edit-in-place, 다이제스트에 git/테스트 반영 |
-| **v3** | 프롬프트 인젝션 방어(도구 정책), Telegram·Slack 전송, TODO 데이터 소스, 다중 세션 브로커 |
+| **v3** ✅ | 프롬프트 인젝션 방어(도구 정책 + 승인), Telegram 전송, 어댑터 conformance 키트, TODO 데이터 소스, 리플레이 하네스, rate limit, 감사 로그 |
+| **v4** | Slack 전송, 단일 봇 + 다중 세션 브로커 |
 
 ---
 

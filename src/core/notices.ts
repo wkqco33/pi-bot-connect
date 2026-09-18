@@ -33,6 +33,9 @@ export function truncatedNotice(dropped: number): string {
 /** Sent when a prompt arrives for a paused conversation. */
 export const PAUSED_NOTICE = "Delivery is paused. Send /resume to continue.";
 
+/** Sent once when an identity exceeds the configured remote rate limit. */
+export const RATE_LIMITED_NOTICE = "Too many messages. Please wait a moment before sending more.";
+
 /** Sent when the bridge cannot resolve a command the router approved. */
 export function unknownCommandNotice(name: string): string {
 	return `Unknown command '${name}'.`;

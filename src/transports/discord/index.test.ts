@@ -397,4 +397,18 @@ describe("DiscordTransport — attachment download", () => {
 		const h = setup({ fetchImpl: () => Promise.reject(new Error("ENOTFOUND")) });
 		await expect(h.transport.fetchAttachment(PNG_ATTACHMENT)).rejects.toThrow(/could not reach/);
 	});
+
+	it("passes an abort signal so a hung CDN cannot block the turn", async () => {
+		let seen: AbortSignal | null | undefined;
+		const h = setup({
+			fetchImpl: (_input, init) => {
+				seen = init?.signal;
+				return Promise.resolve(imageResponse(bytes));
+			},
+		});
+
+		await h.transport.fetchAttachment(PNG_ATTACHMENT);
+
+		expect(seen).toBeInstanceOf(AbortSignal);
+	});
 });

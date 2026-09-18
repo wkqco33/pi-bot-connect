@@ -33,7 +33,11 @@ const BRIDGE_KEYS = new Set([
 	"requireAddressing",
 	"digest",
 	"attachments",
+	"broadcast",
+	"rateLimit",
 	"progressMinIntervalMs",
+	"remoteToolPolicy",
+	"remoteToolApproval",
 	"maxChunks",
 ]);
 
@@ -185,8 +189,68 @@ function parseBridgeSection(raw: unknown, ctx: Context): Partial<BridgeConfig> {
 	const progressMinIntervalMs = readIntegerInRange(ctx, raw, "progressMinIntervalMs", path, 0, 60_000);
 	if (progressMinIntervalMs !== undefined) config.progressMinIntervalMs = progressMinIntervalMs;
 
+	const remoteToolPolicy = readString(ctx, raw, "remoteToolPolicy", path);
+	if (remoteToolPolicy !== undefined) {
+		if (remoteToolPolicy === "unrestricted" || remoteToolPolicy === "read-only" || remoteToolPolicy === "no-tools") {
+			config.remoteToolPolicy = remoteToolPolicy;
+		} else {
+			ctx.errors.push(
+				`${path}.remoteToolPolicy: expected "unrestricted", "read-only" or "no-tools", received "${remoteToolPolicy}"`,
+			);
+		}
+	}
+
+	const remoteToolApproval = readString(ctx, raw, "remoteToolApproval", path);
+	if (remoteToolApproval !== undefined) {
+		if (remoteToolApproval === "off" || remoteToolApproval === "each") {
+			config.remoteToolApproval = remoteToolApproval;
+		} else {
+			ctx.errors.push(`${path}.remoteToolApproval: expected "off" or "each", received "${remoteToolApproval}"`);
+		}
+	}
+
 	const maxChunks = readIntegerInRange(ctx, raw, "maxChunks", path, 1, 50);
 	if (maxChunks !== undefined) config.maxChunks = maxChunks;
+
+	if (raw.broadcast !== undefined) {
+		const broadcastPath = `${path}.broadcast`;
+		if (!isPlainObject(raw.broadcast)) {
+			ctx.errors.push(`${broadcastPath}: expected an object`);
+		} else {
+			for (const key of Object.keys(raw.broadcast)) {
+				if (key !== "progress" && key !== "replies") {
+					ctx.warnings.push(`${broadcastPath}.${key}: unknown key, ignored`);
+				}
+			}
+			// Built from defaults so a partial section never yields a half policy.
+			const broadcast = { ...DEFAULT_CONFIG.broadcast };
+			const progress = readBoolean(ctx, raw.broadcast, "progress", broadcastPath);
+			if (progress !== undefined) broadcast.progress = progress;
+			const replies = readBoolean(ctx, raw.broadcast, "replies", broadcastPath);
+			if (replies !== undefined) broadcast.replies = replies;
+			config.broadcast = broadcast;
+		}
+	}
+
+	if (raw.rateLimit !== undefined) {
+		const ratePath = `${path}.rateLimit`;
+		if (!isPlainObject(raw.rateLimit)) {
+			ctx.errors.push(`${ratePath}: expected an object`);
+		} else {
+			for (const key of Object.keys(raw.rateLimit)) {
+				if (key !== "promptsPerMinute" && key !== "commandsPerMinute") {
+					ctx.warnings.push(`${ratePath}.${key}: unknown key, ignored`);
+				}
+			}
+			// Built from defaults so a partial section never yields a half policy.
+			const rateLimit = { ...DEFAULT_CONFIG.rateLimit };
+			const prompts = readIntegerInRange(ctx, raw.rateLimit, "promptsPerMinute", ratePath, 0, 600);
+			if (prompts !== undefined) rateLimit.promptsPerMinute = prompts;
+			const commands = readIntegerInRange(ctx, raw.rateLimit, "commandsPerMinute", ratePath, 0, 600);
+			if (commands !== undefined) rateLimit.commandsPerMinute = commands;
+			config.rateLimit = rateLimit;
+		}
+	}
 
 	if (raw.attachments !== undefined) {
 		const attachmentPath = `${path}.attachments`;

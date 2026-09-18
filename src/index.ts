@@ -20,9 +20,18 @@ import { parseConfigFile } from "./config.js";
 import { formatDuration } from "./core/commands.js";
 import { buildWorkDigest } from "./core/digest.js";
 import type { DigestFileChange } from "./core/digest.js";
+import type { DigestTodo } from "./core/digest.js";
 import { extractAssistantText, extractToolText, summarize } from "./core/message.js";
 import { formatChallengeCode } from "./core/pairing.js";
 import { toolEndLabel, toolStartLabel } from "./core/progress.js";
+import { extractMarkdownTodos } from "./core/todo.js";
+import {
+	decideRemoteToolAccess,
+	remoteToolApprovalPrompt,
+	remoteToolBlockReason,
+	remoteToolDeclinedReason,
+	type RemoteToolPolicy,
+} from "./core/tool-policy.js";
 import { resolveConfig, type BridgeConfig, type Logger, type PromptImage } from "./core/types.js";
 import { parseGitBranch, parseGitNumstat, summarizeTestRun } from "./core/work.js";
 import { FileBridgeStore } from "./file-store.js";
@@ -202,8 +211,12 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 	let currentSessionKey = "ephemeral";
 	let sessionCtx: ExtensionContext | null = null;
 	let runningTool: string | undefined;
+	/** True for the duration of a turn that a messenger started (G1). */
+	let remoteTurn = false;
 	let lastAssistantText = "";
 	let lastUserPrompt = "";
+	/** Latest assistant checklist, kept across turns for the digest's TODO section. */
+	let lastTodos: DigestTodo[] = [];
 	let lastShell: LastShellRun | null = null;
 	/** Keyed by tool call id so parallel bash calls cannot overwrite each other. */
 	const shellCommands = new Map<string, string>();
@@ -319,6 +332,7 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 				runningTool,
 				lastUserPrompt: lastUserPrompt.length > 0 ? lastUserPrompt : undefined,
 				lastAssistantSummary: lastAssistantText.length > 0 ? summarize(lastAssistantText, 300) : undefined,
+				...(lastTodos.length > 0 ? { todos: lastTodos } : {}),
 				...work,
 				testSummary,
 			},
@@ -455,6 +469,8 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 		});
 
 		currentSessionKey = sessionKey(ctx);
+		remoteTurn = false;
+		lastTodos = [];
 		const notes = [...loaded.notes, ...created.errors];
 		let bridgeStore: BridgeStore;
 		try {
@@ -489,8 +505,10 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 		}
 		sessionCtx = null;
 		runningTool = undefined;
+		remoteTurn = false;
 		lastAssistantText = "";
 		lastUserPrompt = "";
+		lastTodos = [];
 	});
 
 	// --- session tracking for digest + progress -------------------------------
@@ -498,6 +516,12 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 	pi.on("before_agent_start", async (event, ctx) => {
 		sessionCtx = ctx;
 		lastUserPrompt = event.prompt;
+	});
+
+	// A turn injected by the bridge (or any extension) is untrusted input. The
+	// policy only ever applies to those turns; locally typed work is untouched.
+	pi.on("input", async (event) => {
+		remoteTurn = event.source === "extension";
 	});
 
 	pi.on("agent_start", async (_event, ctx) => {
@@ -540,11 +564,38 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 		if (event.message.role !== "assistant") return;
 		const text = extractAssistantText(event.message.content);
 		if (text.length > 0) lastAssistantText = text;
+		const todos = extractMarkdownTodos(text);
+		if (todos.length > 0) lastTodos = todos;
+	});
+
+	// Blocks a tool call on a messenger-originated turn per the configured policy,
+	// and optionally asks the local operator to approve it. The decisions are pure
+	// (`core/tool-policy.ts`); this handler only adapts them to pi.
+	pi.on("tool_call", async (event, ctx) => {
+		if (!remoteTurn) return undefined;
+		const policy: RemoteToolPolicy = bridge?.config.remoteToolPolicy ?? "unrestricted";
+		if (decideRemoteToolAccess(policy, event.toolName) === "block") {
+			logger.warn("blocked a tool on a remote turn", { tool: event.toolName, policy });
+			return { block: true, reason: remoteToolBlockReason(policy, event.toolName) };
+		}
+		if ((bridge?.config.remoteToolApproval ?? "off") !== "each") return undefined;
+
+		const prompt = remoteToolApprovalPrompt(event.toolName);
+		let approved = false;
+		try {
+			approved = await ctx.ui.confirm(prompt.title, prompt.message);
+		} catch (error) {
+			logger.warn("tool approval prompt failed", { error: String(error) });
+		}
+		if (approved) return undefined;
+		logger.warn("operator declined a remote tool", { tool: event.toolName });
+		return { block: true, reason: remoteToolDeclinedReason(event.toolName) };
 	});
 
 	pi.on("agent_settled", async (_event, ctx) => {
 		sessionCtx = ctx;
 		runningTool = undefined;
+		remoteTurn = false;
 		ctx.ui.setStatus(COMMAND_KEY, statusLabel());
 		const text = lastAssistantText;
 		lastAssistantText = "";

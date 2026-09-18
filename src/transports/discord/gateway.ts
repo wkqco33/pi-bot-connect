@@ -204,12 +204,10 @@ export class DiscordGateway {
 	// --- connection ----------------------------------------------------------
 
 	private open(): Promise<void> {
-		if (this.resolveReady !== null && this.readyTimer === null) {
-			const timeout = this.options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
-			this.readyTimer = this.options.scheduler.setTimeout(() => {
-				this.fail(new Error(`Discord gateway did not become ready within ${timeout}ms`));
-			}, timeout);
-		}
+		// Every open gets a deadline, not just the first one. A socket that never
+		// sends HELLO (after a reconnect) would otherwise sit in "reconnecting"
+		// forever: no heartbeat is armed until HELLO arrives.
+		this.armReadyTimer();
 
 		this.currentState = this.sessionId === null ? "connecting" : "reconnecting";
 
@@ -265,6 +263,22 @@ export class DiscordGateway {
 		this.rejectReady = null;
 		if (reject) reject(error);
 		else this.options.hooks.log.error("discord gateway failed", { error: error.message });
+	}
+
+	private armReadyTimer(): void {
+		this.clearReadyTimer();
+		const timeout = this.options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
+		this.readyTimer = this.options.scheduler.setTimeout(() => {
+			this.readyTimer = null;
+			if (this.stopped) return;
+			// A pending start() must fail loudly; a reconnect just tries again and
+			// stays bounded by the backoff budget.
+			if (this.resolveReady !== null) {
+				this.fail(new Error(`Discord gateway did not become ready within ${timeout}ms`));
+				return;
+			}
+			this.reconnect("gateway did not send HELLO");
+		}, timeout);
 	}
 
 	private clearReadyTimer(): void {
@@ -323,6 +337,10 @@ export class DiscordGateway {
 			this.handleReady(frame.d);
 			return;
 		}
+		if (type === "RESUMED") {
+			this.handleResumed();
+			return;
+		}
 		this.options.hooks.onDispatch(type, frame.d);
 	}
 
@@ -340,6 +358,16 @@ export class DiscordGateway {
 		this.resolveReady = null;
 		this.rejectReady = null;
 		resolve?.();
+	}
+
+	private handleResumed(): void {
+		// RESUME succeeded in place of READY. Without this the gateway would keep
+		// reporting "reconnecting" and the ready deadline would force a needless
+		// reconnect loop.
+		this.attempts = 0;
+		this.clearReadyTimer();
+		this.currentState = "ready";
+		this.options.hooks.log.info("discord gateway resumed");
 	}
 
 	private handleClose(code: number, reason: string): void {

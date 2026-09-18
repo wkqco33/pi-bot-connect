@@ -13,16 +13,36 @@ export interface RedactionRule {
 
 /** Applied in order. Keep the most specific patterns first. */
 export const DEFAULT_REDACTION_RULES: readonly RedactionRule[] = [
+	{
+		name: "private-key",
+		// Multiline PEM block. Must run before line-oriented rules.
+		pattern: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
+		replacement: "[redacted:private-key]",
+	},
 	{ name: "anthropic-key", pattern: /\bsk-ant-[A-Za-z0-9_-]{16,}\b/g, replacement: "[redacted:anthropic-key]" },
 	{ name: "openai-key", pattern: /\bsk-[A-Za-z0-9]{20,}\b/g, replacement: "[redacted:openai-key]" },
 	{ name: "github-token", pattern: /\bgh[pousr]_[A-Za-z0-9]{16,}\b/g, replacement: "[redacted:github-token]" },
 	{ name: "slack-bot-token", pattern: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, replacement: "[redacted:slack-token]" },
+	{ name: "npm-token", pattern: /\bnpm_[A-Za-z0-9]{36}\b/g, replacement: "[redacted:npm-token]" },
+	{ name: "discord-token", pattern: /\b[MN][A-Za-z\d]{23}\.[\w-]{6}\.[\w-]{27,}\b/g, replacement: "[redacted:discord-token]" },
+	{
+		name: "jwt",
+		pattern: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
+		replacement: "[redacted:jwt]",
+	},
 	{ name: "aws-access-key", pattern: /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, replacement: "[redacted:aws-key]" },
 	{ name: "google-api-key", pattern: /\bAIza[A-Za-z0-9_-]{35}\b/g, replacement: "[redacted:google-key]" },
 	{
 		name: "telegram-bot-token",
 		pattern: /\b\d{8,12}:[A-Za-z0-9_-]{35}\b/g,
 		replacement: "[redacted:telegram-token]",
+	},
+	{
+		// Non-Bearer header values (Basic, raw keys). Bearer is handled below so
+		// the existing readable replacement is preserved.
+		name: "auth-header",
+		pattern: /\b(Authorization|X-Api-Key|X-Auth-Token|X-Access-Token)\s*:\s*(?!\s*Bearer\b)[^\n]*/gi,
+		replacement: "$1: [redacted]",
 	},
 	{
 		name: "bearer-header",

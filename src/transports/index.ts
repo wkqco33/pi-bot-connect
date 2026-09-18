@@ -9,6 +9,7 @@
 
 import type { Logger, Transport } from "../core/types.js";
 import { DiscordTransport } from "./discord/index.js";
+import { TelegramTransport } from "./telegram/index.js";
 
 export interface TransportFactoryContext {
 	readonly transportConfig: Readonly<Record<string, unknown>>;
@@ -62,7 +63,35 @@ const discordFactory: TransportFactory = {
 	},
 };
 
-const FACTORIES: readonly TransportFactory[] = [discordFactory];
+const telegramFactory: TransportFactory = {
+	id: "telegram",
+	create(context) {
+		const raw = context.transportConfig.telegram;
+		const config = isRecord(raw) ? raw : {};
+		const explicitlyEnabled = config.enabled === true;
+		const tokenEnv = readString(config, "tokenEnv") ?? "PI_TELEGRAM_TOKEN";
+		const token = process.env[tokenEnv];
+
+		if (token === undefined || token.length === 0) {
+			if (explicitlyEnabled) {
+				throw new Error(
+					`Telegram is enabled but $${tokenEnv} is not set. Export the bot token in the environment; never put it in the config file.`,
+				);
+			}
+			return null;
+		}
+
+		const lockStaleMs = typeof config.lockStaleMs === "number" ? config.lockStaleMs : undefined;
+		return new TelegramTransport({
+			token,
+			lockDir: context.lockDir,
+			logger: context.logger,
+			...(lockStaleMs === undefined ? {} : { lockStaleMs }),
+		});
+	},
+};
+
+const FACTORIES: readonly TransportFactory[] = [discordFactory, telegramFactory];
 
 export function listTransportFactories(): readonly TransportFactory[] {
 	return FACTORIES;

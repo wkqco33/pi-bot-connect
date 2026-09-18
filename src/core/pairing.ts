@@ -86,6 +86,12 @@ export function decidePairing(params: DecidePairingParams): PairingDecision {
 		if (provided.length === 0) {
 			return { type: "ask", pending, reason: "awaiting" };
 		}
+		// A guess must look like a code. Unrelated chatter that merely contains a
+		// few digits ("meeting at 3pm") must not burn an attempt: in a channel
+		// that would otherwise let anyone lock the challenge by typing numbers.
+		if (provided.length !== pending.code.length) {
+			return { type: "ask", pending, reason: "awaiting" };
+		}
 		if (provided === pending.code) {
 			return { type: "trust" };
 		}

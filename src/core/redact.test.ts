@@ -28,6 +28,37 @@ describe("redactSecrets", () => {
 		);
 	});
 
+	it("redacts private key blocks", () => {
+		const pem = ["-----BEGIN RSA PRIVATE KEY-----", "MIIEowIBAAKCAQEA", "-----END RSA PRIVATE KEY-----"].join("\n");
+		const out = redactSecrets(`key follows\n${pem}\n`);
+		expect(out).not.toContain("MIIEowIBAAKCAQEA");
+		expect(out).toContain("[redacted:private-key]");
+	});
+
+	it("redacts JSON web tokens", () => {
+		const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
+		const out = redactSecrets(`token ${jwt}`);
+		expect(out).not.toContain("eyJhbGciOiJIUzI1NiJ9");
+		expect(out).toContain("[redacted:jwt]");
+	});
+
+	it("redacts a Discord bot token", () => {
+		const token = `M${'a'.repeat(23)}.${'b'.repeat(6)}.${'c'.repeat(30)}`;
+		const out = redactSecrets(`bot ${token}`);
+		expect(out).not.toContain(token);
+		expect(out).toContain("[redacted:discord-token]");
+	});
+
+	it("redacts an npm token", () => {
+		const out = redactSecrets(`//registry.npmjs.org/:_authToken=npm_${'A'.repeat(36)}`);
+		expect(out).not.toContain(`npm_${'A'.repeat(36)}`);
+	});
+
+	it("redacts API key headers that are not bearer tokens", () => {
+		expect(redactSecrets("X-Api-Key: abc123def456")).toBe("X-Api-Key: [redacted]");
+		expect(redactSecrets("Authorization: Basic dXNlcjpwYXNz")).toBe("Authorization: [redacted]");
+	});
+
 	it("redacts secret env assignments but keeps the variable name", () => {
 		expect(redactSecrets('export PI_TELEGRAM_TOKEN="123:secret"')).toBe("export PI_TELEGRAM_TOKEN=[redacted]");
 		expect(redactSecrets("SLACK_APP_TOKEN=xapp-1-abcdefghijklmnop")).toBe("SLACK_APP_TOKEN=[redacted]");

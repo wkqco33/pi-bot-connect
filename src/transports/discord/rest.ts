@@ -9,6 +9,13 @@ import { DISCORD_API_VERSION } from "./normalize.js";
 
 export const DISCORD_API_BASE = `https://discord.com/api/v${DISCORD_API_VERSION}`;
 
+/** Per-request deadline. Discord normally answers well within this. */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
+
+/** Backoff for transient 5xx/network failures, in milliseconds. */
+const RETRY_BASE_MS = 250;
+const RETRY_MAX_MS = 5_000;
+
 export interface DiscordBotIdentity {
 	readonly id: string;
 	readonly username: string;
@@ -32,6 +39,8 @@ export interface DiscordRestOptions {
 	readonly fetchImpl?: typeof fetch;
 	readonly delayImpl?: (ms: number) => Promise<void>;
 	readonly maxRateLimitRetries?: number;
+	/** Aborts an individual HTTP request so a hung socket cannot block a turn. */
+	readonly timeoutMs?: number;
 }
 
 interface RequestInitLike {
@@ -53,6 +62,7 @@ export class DiscordRest implements DiscordApi {
 	private readonly fetchImpl: typeof fetch;
 	private readonly delayImpl: (ms: number) => Promise<void>;
 	private readonly maxRetries: number;
+	private readonly timeoutMs: number;
 
 	constructor(options: DiscordRestOptions) {
 		this.token = options.token;
@@ -60,6 +70,7 @@ export class DiscordRest implements DiscordApi {
 		this.fetchImpl = options.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
 		this.delayImpl = options.delayImpl ?? defaultDelay;
 		this.maxRetries = options.maxRateLimitRetries ?? 1;
+		this.timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
 	}
 
 	async getBotIdentity(): Promise<DiscordBotIdentity> {
@@ -113,6 +124,7 @@ export class DiscordRest implements DiscordApi {
 					// Discord rejects requests without a recognisable user agent.
 					"User-Agent": "DiscordBot (https://github.com/, 0.0.0)",
 				},
+				signal: AbortSignal.timeout(this.timeoutMs),
 				...(init.body === undefined ? {} : { body: init.body }),
 			});
 		} catch (error) {
@@ -120,19 +132,43 @@ export class DiscordRest implements DiscordApi {
 		}
 	}
 
+	private retryDelayMs(attempt: number): number {
+		return Math.min(RETRY_BASE_MS * 2 ** attempt, RETRY_MAX_MS);
+	}
+
 	private async request(path: string, init: RequestInitLike): Promise<unknown> {
-		let rateLimitError: Error | null = null;
+		let lastError: Error | null = null;
 
 		for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
-			const response = await this.send(path, init);
+			let response: Response;
+			try {
+				response = await this.send(path, init);
+			} catch (error) {
+				// Network-level failures are as transient as a 5xx; retry them too.
+				lastError = error instanceof Error ? error : new Error(String(error));
+				if (attempt < this.maxRetries) {
+					await this.delayImpl(this.retryDelayMs(attempt));
+					continue;
+				}
+				throw lastError;
+			}
 
 			if (response.status === 429) {
-				rateLimitError = new Error(`Discord ${init.method} ${path} was rate limited`);
+				lastError = new Error(`Discord ${init.method} ${path} was rate limited`);
 				if (attempt < this.maxRetries) {
 					await this.delayImpl(await this.readRetryAfter(response));
 					continue;
 				}
-				throw rateLimitError;
+				throw lastError;
+			}
+
+			if (response.status >= 500) {
+				lastError = new Error(await this.describeError(response, init.method, path));
+				if (attempt < this.maxRetries) {
+					await this.delayImpl(this.retryDelayMs(attempt));
+					continue;
+				}
+				throw lastError;
 			}
 
 			if (!response.ok) {
@@ -142,7 +178,7 @@ export class DiscordRest implements DiscordApi {
 			return await this.readJson(response, init.method, path);
 		}
 
-		throw rateLimitError ?? new Error(`Discord ${init.method} ${path} failed`);
+		throw lastError ?? new Error(`Discord ${init.method} ${path} failed`);
 	}
 
 	private async readJson(response: Response, method: string, path: string): Promise<unknown> {
