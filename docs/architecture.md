@@ -63,6 +63,7 @@ interface Transport {
 6. **재연결/백오프는 어댑터 책임이다.** 코어는 재시도를 하지 않는다.
 7. **첨부를 지원하려면 `fetchAttachment`를 구현해야 한다.** `capabilities.attachments: true`는 운반 가능 선언일 뿐이고, 실제 전달 여부는 브리지가 두 capability를 AND해서 결정한다.
 8. **conformance 테스트를 통과한다** (아래 5장).
+9. **진행 표시를 지원하려면 `typing()`을 구현한다.** 선택 멤버다. 브리지는 실패를 삼키고(베스트 에포트), 어댑터 스스로 호출 빈도를 제한해야 한다. `typing()`이 없으면 아무 일도 일어나지 않아야 한다.
 
 ### 2.3 capability 예시
 
@@ -74,8 +75,6 @@ interface Transport {
 | slack | 4000 | chars | mrkdwn | true | true |
 
 Discord는 스레드에서 `channel_id`가 스레드 자체의 id이므로 `conversationId`가 자동으로 분리된다. 별도 `threadId` 추적이 필요 없어 `threads: false`로 두었다(부모 채널과의 관계를 다루지 않는다는 뜻). `attachments: true`는 전송이 첨부를 **운반할 수 있다**는 뜻이며, 호스트가 그것을 모델에 전달할 수 있는지와는 별개다.
-| discord | 2000 | chars | markdown | true | true |
-| slack | 4000 | chars | mrkdwn | true | true |
 
 ---
 
@@ -106,6 +105,9 @@ Discord는 스레드에서 `channel_id`가 스레드 자체의 id이므로 `conv
 | I19 | 첨부 크기는 선언값이 아니라 다운로드한 바이트로 검사한다. | `bridge.test.ts`, `discord/index.test.ts` |
 | I20 | 진행 상황은 턴당 메시지 하나를 갱신한다. 툴 호출마다 새 메시지를 보내지 않는다. | `bridge.test.ts` |
 | I21 | 편집이 거부되면 새 메시지로 폴백하며, 카드 핸들은 재사용되지 않는다. | `bridge.test.ts` |
+| I22 | 한 번의 송신 본문은 `maxChunks`개를 넘지 않는다. 초과분은 조용히 버리지 않고 잘렸다고 알린다. | `chunk.test.ts`, `bridge.test.ts` |
+| I23 | 툴 이벤트가 없는 추론 구간에도 "thinking…" 카드가 표시된다. | `progress.test.ts`, `bridge.test.ts` |
+| I24 | `typing()` 실패는 턴을 실패시키지 않는다. 없거나 거부되면 그냥 진행한다. | `bridge.test.ts`, `discord/index.test.ts` |
 
 ---
 
@@ -115,11 +117,11 @@ Discord는 스레드에서 `channel_id`가 스레드 자체의 id이므로 `conv
 
 | 계층 | 방식 | 현재 |
 | --- | --- | --- |
-| `core/*` | 순수 함수 단위 테스트. 결정적 rng/clock 주입 | 137+ 테스트 |
-| `bridge.ts` | `FakeTransport` + `FakeHost`로 전 구간 시나리오 | 26 테스트 |
-| `config.ts` | 신뢰할 수 없는 JSON 검증 테이블 테스트 | 18 테스트 |
-| `index.ts` | 타입체크 + 배선 테스트(가짜 `ExtensionAPI`로 팩토리 구동). **커버리지 제외** | 22 테스트 |
-| `transports/*` | 계약 conformance + 플랫폼별 payload fixture | v1 |
+| `core/*` | 순수 함수 단위 테스트. 결정적 rng/clock 주입 | 178 테스트 |
+| `bridge.ts` | `FakeTransport` + `FakeHost`로 전 구간 시나리오 | 52 테스트 |
+| `config.ts` | 신뢰할 수 없는 JSON 검증 테이블 테스트 | 30 테스트 |
+| `index.ts` | 타입체크 + 배선 테스트(가짜 `ExtensionAPI`로 팩토리 구동). **커버리지 제외** | 36 테스트 |
+| `transports/*` | 계약 conformance + 플랫폼별 payload fixture | 81 테스트 |
 
 ### 4.2 결정성 확보 방법
 
@@ -186,6 +188,7 @@ const decision = decidePairing({ ..., now: 10, random: digitSequence("987654") }
 - [ ] `send()`가 시작 전이면 명확히 throw한다
 - [ ] 게이트웨이/폴링 연결에 READY 타임아웃이 있다 (무한 대기 금지)
 - [ ] 첨부를 지원하면 `fetchAttachment`가 자체 크기 상한을 적용하고, 선언 크기가 아니라 실제 바이트로 검사한다
+- [ ] `typing()`을 구현했다면 스스로 호출 빈도를 제한하고, 실패해도 전송을 막지 않는다
 
 ---
 
@@ -233,7 +236,8 @@ const decision = decidePairing({ ..., now: 10, random: digitSequence("987654") }
       "maxCount": 4,                 // 1 ~ 10
       "maxBytes": 8388608            // 1024 ~ 52428800
     },
-    "progressMinIntervalMs": 1000     // 0 ~ 60000. 턴 안에서 진행 카드 갱신 최소 간격
+    "progressMinIntervalMs": 1000,     // 0 ~ 60000. 턴 안에서 진행 카드 갱신 최소 간격
+    "maxChunks": 8                     // 1 ~ 50. 한 번의 송신이 만들 수 있는 최대 메시지 수. 초과분은 잘렸다고 알린다
   },
   "transports": {
     // 전송별 설정. 비밀값 금지, env 변수 이름만.

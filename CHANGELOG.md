@@ -11,6 +11,9 @@
 
 ### Added
 
+- 긴 응답을 전송 한도(2000자) 단위로 나누어 전송. `bridge.maxChunks`(기본 8) 상한을 넘으면 잘렸다고 알린다
+- 진행 카드가 도구 호출 없는 추론 구간에도 `thinking…`을 표시한다
+- Discord typing 표시 (선택적 `Transport.typing()`, 채널당 8초 스로틀). 실패해도 턴을 막지 않는다
 - Telegram 전송 (롱폴링, 4096 bytes, HTML). 코어는 이미 전송 무관이므로 어댑터만 추가하면 된다
 - Slack 전송 (Socket Mode, mrkdwn)
 - 전송 conformance 테스트 키트 (`src/transports/transport-contract.test.ts`)

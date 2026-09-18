@@ -82,7 +82,7 @@ pi.on("tool_execution_start", async (event, ctx) => {
 
 **"이 `if`는 정책인가?"** → 그렇다면 코어로 옮기고 테스트를 쓴다.
 `src/index.ts`는 커버리지에서 제외되어 있으므로, 여기 있는 로직은 **아무도 지켜주지 않는다**.
-예외는 `src/index.test.ts`(배선 테스트 22개)다. 이 테스트는 팩토리를 가짜 `ExtensionAPI`로 구동해 **이벤트 이름·명령 등록·설정 오류 전파**를 검증한다. 로직을 검증하려는 테스트를 여기 추가하려 한다면, 그 로직을 먼저 코어로 옮겨라.
+예외는 `src/index.test.ts`(배선 테스트 36개)다. 이 테스트는 팩토리를 가짜 `ExtensionAPI`로 구동해 **이벤트 이름·명령 등록·설정 오류 전파**를 검증한다. 로직을 검증하려는 테스트를 여기 추가하려 한다면, 그 로직을 먼저 코어로 옮겨라.
 
 ### R5. 보안 불변식을 깨지 않는다
 
@@ -135,9 +135,9 @@ PI_BOT_CONNECT_DEBUG=1 pi -e ./src/index.ts   # 어댑터 로그 활성화
 ```text
 src/
 ├── index.ts                 [껍데기] pi 어댑터. 커버리지 제외. 정책 금지
-├── index.test.ts            배선 테스트 22개 — 가짜 ExtensionAPI로 팩토리를 구동
+├── index.test.ts            배선 테스트 36개 — 가짜 ExtensionAPI로 팩토리를 구동
 ├── bridge.ts                오케스트레이션. 전송↔코어↔세션 연결 + 송신 파이프라인
-├── bridge.test.ts           26 테스트 — 전 구간 시나리오 (FakeTransport + FakeHost)
+├── bridge.test.ts           52 테스트 — 전 구간 시나리오 (FakeTransport + FakeHost)
 ├── config.ts                설정 파일 검증 (신뢰할 수 없는 입력)
 ├── LICENSE / CHANGELOG.md / .editorconfig   배포 메타데이터
 ├── .github/workflows/ci.yml  check(22.19·24) + 태그 기반 publish (액션은 SHA 고정)
@@ -399,14 +399,16 @@ docs(agents): document the transport conformance checklist
 | 코어 (라우팅/페어링/리댁션/청킹/마크다운/다이제스트) | ✅ 완료, 테스트로 고정 |
 | 브리지 오케스트레이션 | ✅ 완료 |
 | 설정 검증 | ✅ 완료 |
-| pi 어댑터 셸 + 로컬 `/connect` 명령 | ✅ 완료 (배선 테스트 29개) |
+| pi 어댑터 셸 + 로컬 `/connect` 명령 | ✅ 완료 (배선 테스트 36개) |
 | 상태 영속화 (세션별 격리) | ✅ 완료 |
 | 단일 인스턴스 락 | ✅ 완료 |
 | `/connect doctor` | ✅ 완료 |
 | **Discord 전송** | ✅ 완료 (봇 SDK 없이 게이트웨이 직접 구현) |
-| 테스트 | 386 통과 / typecheck 0 에러 / 3회 연속 안정 |
+| 테스트 | 416 통과 / typecheck 0 에러 / 3회 연속 안정 |
 | **첨부(이미지) 전달** | ✅ 완료 (양쪽 capability 확인 + 다운로드 후 크기 재검사) |
 | **진행 상황 edit-in-place** | ✅ 완료 (턴당 카드 1개, 스로틀, 편집 실패 시 폴백) |
+| **추론 진행 카드 + typing** | ✅ 완료 (툴 없는 구간은 `thinking…`, 선택적 `typing()`은 베스트 에포트) |
+| **긴 응답 분할** | ✅ 완료 (전송 한도 단위로 분할, `maxChunks` 상한 + 잘림 안내) |
 | **다이제스트 데이터 소스** | ✅ 완료 (브랜치 / 변경 파일 / 테스트 결과) |
 | Telegram · Slack 전송 | ❌ 미구현 |
 | TODO를 다이제스트에 포함 | ❌ 미구현 — 어떤 TODO 확장의 형태를 읽을지 결정 필요 |
