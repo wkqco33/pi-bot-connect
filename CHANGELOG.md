@@ -11,11 +11,33 @@
 
 ### Planned
 
-- Telegram 전송 (롱폴링, 4096 bytes, HTML). 코어는 이미 전송 무관이므로 어댑터만 추가하면 된다
-- Slack 전송 (Socket Mode, mrkdwn)
-- 전송 conformance 테스트 키트 (`src/transports/transport-contract.test.ts`)
-- 다이제스트에 TODO 포함 (세션 엔트리의 형태를 먼저 확인한 뒤 방어적으로 파싱)
-- 엔벨로프 record/replay 하네스
+- Slack 전송 (Socket Mode, mrkdwn, 4000자). conformance harness 1개 + 팩토리 등록이면 된다
+- 단일 봇 + 다중 세션 브로커 (G3) — 세션↔대화 바인딩 정책 결정 필요
+- 원격 턴을 로컬 TUI에 남기는 맥락 병합 (G2)
+
+## [0.4.0] - 2026-09-18
+
+### Added
+
+- `bridge.remoteToolPolicy` (`unrestricted` | `read-only` | `no-tools`). 메신저에서 시작된 턴의 도구 사용을 제한한다. 로컬 턴에는 적용되지 않는다 (G1의 도구 정책 부분)
+- `bridge.broadcast` (`progress`, `replies`). 자동 진행 카드/최종 답변 브로드캐스트를 끌 수 있다. 명시적 `/connect digest`는 항상 전송된다
+- 리댁션 규칙 확장: PEM 개인키 블록, JWT, Discord 봇 토큰, npm 토큰, Bearer가 아닌 인증 헤더
+- HTTP 요청·첨부 다운로드에 요청별 타임아웃(`AbortSignal.timeout`)
+- **Telegram 전송**. 롱폴링, 4096 UTF-8 bytes, HTML, 토픽 스레드, `lock.ts` 재사용. `PI_TELEGRAM_TOKEN`
+- **전송 conformance 키트** (`src/transports/transport-contract.test.ts`). Fake·Discord·Telegram이 같은 계약을 통과한다
+- `bridge.remoteToolApproval: "each"` — 정책이 허용한 원격 도구도 로컬 터미널에서 확인받는다 (G1 완료)
+- `bridge.rateLimit` — 신원별 토큰 버킷으로 원격 프롬프트/명령 폭주를 제한한다. 초과 안내는 분당 1회
+- 감사 로그 — 페어링·해제·원격 명령을 메타데이터(`transport`/`identity`/이름)로만 기록한다
+- 다이제스트 TODO 소스 — 어시스턴트 체크리스트를 `core/todo.ts`가 파싱한다
+- 리플레이 하네스 — `core/transcript.ts`(리댁션 + `raw` 제거) + `transports/replay.ts`
+
+### Fixed
+
+- **송신 실패가 턴/브로드캐스트를 중단시키지 않는다.** 한 메시지나 한 대화가 거부되어도 나머지는 계속 전송되고, 실패는 메타데이터로만 로그에 남는다
+- **게이트웨이 재연결이 HELLO 없이 영구 대기하지 않는다.** 매 연결마다 READY 데드라인을 다시 걸고, 초과 시 다음 백오프로 넘어간다
+- **RESUME 성공(`RESUMED`)이 ready로 복귀**하고 재연결 예산을 리셋한다. 이전에는 상태가 `reconnecting`에 머물렀다
+- Discord REST가 5xx와 네트워크 오류를 백오프로 재시도한다. 4xx는 재시도하지 않는다
+- 페어링 시도는 코드 길이와 정확히 일치하는 숫자열만 소모시킨다. 잡담에 섞인 숫자가 코드를 잠그지 않는다
 
 ## [0.3.0] - 2026-09-18
 
@@ -33,7 +55,6 @@
 
 - `src/core/markdown-blocks.ts` — 펜스 인식 CommonMark 블록 파서와 섹션 패킹. `chunkText`는 전송 한도 보증 안전망으로 남는다(`measureLength` 추가)
 - 한도보다 긴 코드 블록은 조각마다 여는/닫는 펜스를 다시 붙여 각 메시지가 유효한 코드 블록이 된다. 이 경우에만 `join(chunks) === source`가 성립하지 않는다(코드 내용은 그대로)
-- 프롬프트 인젝션 방어 (도구 정책/승인 게이트). 채팅을 다른 사람과 공유하는 순간 필요해진다 (G1)
 
 ## [0.2.0] - 2026-09-18
 
