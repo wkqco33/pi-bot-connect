@@ -115,7 +115,12 @@ export interface TransportCapabilities {
 	readonly attachments: boolean;
 	/** Maximum length of a single message, measured per `lengthUnit`. */
 	readonly maxMessageLength: number;
-	readonly lengthUnit: "chars" | "bytes";
+	/**
+	 * How the platform counts `maxMessageLength`. `chars` = code points,
+	 * `utf16` = UTF-16 code units (Discord counts these, so an emoji costs two),
+	 * `bytes` = UTF-8 bytes.
+	 */
+	readonly lengthUnit: "chars" | "bytes" | "utf16";
 	readonly markdown: MarkdownFlavor;
 	/** Whether the transport can distinguish channels from direct messages. */
 	readonly channels: boolean;

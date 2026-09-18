@@ -8,11 +8,13 @@
  *  - `chunks.join("") === text` so nothing is lost or duplicated
  */
 
+export type LengthUnit = "chars" | "bytes" | "utf16";
+
 export interface ChunkOptions {
 	/** Maximum size of one chunk. Must be a positive integer. */
 	readonly maxLength: number;
 	/** How `maxLength` is measured. Defaults to code points. */
-	readonly unit?: "chars" | "bytes";
+	readonly unit?: LengthUnit;
 	/** Break candidates, in descending preference order. Defaults to prose breaks. */
 	readonly breakPoints?: readonly string[];
 	/**
@@ -23,14 +25,44 @@ export interface ChunkOptions {
 	readonly minFillRatio?: number;
 }
 
-const DEFAULT_BREAK_POINTS = ["\n\n", "\n", ". ", "! ", "? ", "; ", ", ", " "] as const;
+const DEFAULT_BREAK_POINTS = [
+	"\r\n\r\n",
+	"\n\n",
+	"\r\n",
+	"\n",
+	". ",
+	"! ",
+	"? ",
+	"; ",
+	", ",
+	" ",
+] as const;
 
-function codePointByteLength(codePoint: string): number {
+/**
+ * Size of one code point in the transport's unit.
+ * `chars` counts code points, `utf16` code units (what Discord actually counts,
+ * so an emoji costs two) and `bytes` UTF-8 bytes.
+ */
+function codePointSize(codePoint: string, unit: LengthUnit): number {
+	if (unit === "chars") return 1;
 	const cp = codePoint.codePointAt(0) ?? 0;
+	if (unit === "utf16") return cp > 0xffff ? 2 : 1;
 	if (cp < 0x80) return 1;
 	if (cp < 0x800) return 2;
 	if (cp < 0x10000) return 3;
 	return 4;
+}
+
+/**
+ * Size of `text` in the unit a transport measures its limit in. Code points for
+ * `chars`, UTF-16 code units for `utf16`, UTF-8 bytes for `bytes`.
+ * Exported so structure-aware splitters can budget with the same arithmetic that
+ * `chunkText` enforces.
+ */
+export function measureLength(text: string, unit: LengthUnit = "chars"): number {
+	let total = 0;
+	for (const codePoint of text) total += codePointSize(codePoint, unit);
+	return total;
 }
 
 function matchesAt(codePoints: readonly string[], at: number, needle: readonly string[]): boolean {
@@ -68,7 +100,7 @@ export function chunkText(text: string, options: ChunkOptions): string[] {
 	if (text.length === 0) return [];
 
 	const codePoints = Array.from(text);
-	const sizeOf = unit === "bytes" ? codePointByteLength : () => 1;
+	const sizeOf = (codePoint: string): number => codePointSize(codePoint, unit);
 
 	const chunks: string[] = [];
 	let start = 0;
@@ -93,6 +125,12 @@ export function chunkText(text: string, options: ChunkOptions): string[] {
 			if (cut !== null && cut > start) end = cut;
 		}
 
+		// A hard cut can land between a carriage return and its line feed, which
+		// would turn one line ending into a stray `\r` at the end of a message.
+		if (end < codePoints.length && end - 1 > start && codePoints[end - 1] === "\r" && codePoints[end] === "\n") {
+			end--;
+		}
+
 		chunks.push(codePoints.slice(start, end).join(""));
 		start = end;
 	}
@@ -103,7 +141,7 @@ export function chunkText(text: string, options: ChunkOptions): string[] {
 /** Convenience wrapper for transports described by `TransportCapabilities`. */
 export function chunkForTransport(
 	text: string,
-	capabilities: { maxMessageLength: number; lengthUnit: "chars" | "bytes" },
+	capabilities: { maxMessageLength: number; lengthUnit: LengthUnit },
 ): string[] {
 	return chunkText(text, {
 		maxLength: capabilities.maxMessageLength,

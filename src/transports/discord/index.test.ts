@@ -117,7 +117,7 @@ describe("DiscordTransport — capabilities", () => {
 			reactions: false,
 			attachments: true,
 			maxMessageLength: 2000,
-			lengthUnit: "chars",
+			lengthUnit: "utf16",
 			markdown: "markdown",
 			channels: true,
 		});

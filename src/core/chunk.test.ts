@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { capChunkCount, chunkForTransport, chunkText } from "./chunk.js";
+import { capChunkCount, chunkForTransport, chunkText, measureLength } from "./chunk.js";
 
 const utf8Bytes = (value: string): number => new TextEncoder().encode(value).length;
 
@@ -77,6 +77,28 @@ describe("chunkText", () => {
 		expect(chunkText("😀", { maxLength: 1, unit: "bytes" })).toEqual(["😀"]);
 	});
 
+	it("never cuts between a carriage return and its line feed", () => {
+		const text = "aaaa\r\nbbbb";
+		for (const chunk of chunkText(text, { maxLength: 5 })) {
+			expect(chunk.endsWith("\r")).toBe(false);
+			expect(chunk.startsWith("\n")).toBe(false);
+		}
+		expect(chunkText(text, { maxLength: 5 }).join("")).toBe(text);
+	});
+
+	it("prefers a CRLF paragraph break over a CRLF line break", () => {
+		const text = "first part\r\n\r\nsecond part\r\nthird part";
+		expect(chunkText(text, { maxLength: 14 })).toEqual(["first part\r\n\r\n", "second part\r\n", "third part"]);
+	});
+
+	it("keeps chunks inside a UTF-16 budget", () => {
+		expect(chunkText("😀😀😀", { maxLength: 4, unit: "utf16" })).toEqual(["😀😀", "😀"]);
+	});
+
+	it("counts a BMP character as one UTF-16 unit", () => {
+		expect(chunkText("가나다", { maxLength: 2, unit: "utf16" })).toEqual(["가나", "다"]);
+	});
+
 	it("supports a custom break point list", () => {
 		const text = "aaa|bbb|ccc";
 		expect(chunkText(text, { maxLength: 6, breakPoints: ["|"], minFillRatio: 0 })).toEqual([
@@ -84,6 +106,38 @@ describe("chunkText", () => {
 			"bbb|",
 			"ccc",
 		]);
+	});
+});
+
+describe("measureLength", () => {
+	it("counts code points for a char budget", () => {
+		expect(measureLength("😀😀", "chars")).toBe(2);
+	});
+
+	it("counts UTF-8 bytes for a byte budget", () => {
+		expect(measureLength("가나다", "bytes")).toBe(9);
+	});
+
+	it("defaults to chars", () => {
+		expect(measureLength("😀")).toBe(1);
+	});
+
+	it("reports zero for empty input", () => {
+		expect(measureLength("", "bytes")).toBe(0);
+	});
+
+	it("matches the byte budget chunkText enforces", () => {
+		for (const chunk of chunkText("가나다라마바사", { maxLength: 7, unit: "bytes" })) {
+			expect(measureLength(chunk, "bytes")).toBeLessThanOrEqual(7);
+		}
+	});
+
+	it("counts two units for an astral character in a UTF-16 budget", () => {
+		expect(measureLength("😀", "utf16")).toBe(2);
+	});
+
+	it("counts one unit for a BMP character in a UTF-16 budget", () => {
+		expect(measureLength("가나", "utf16")).toBe(2);
 	});
 });
 
@@ -122,5 +176,10 @@ describe("chunkForTransport", () => {
 	it("chunks by characters for char-measured transports", () => {
 		const chunks = chunkForTransport("abcdefghij", { maxMessageLength: 4, lengthUnit: "chars" });
 		expect(chunks).toEqual(["abcd", "efgh", "ij"]);
+	});
+
+	it("chunks by UTF-16 units for platforms that count them", () => {
+		const chunks = chunkForTransport("😀😀😀", { maxMessageLength: 4, lengthUnit: "utf16" });
+		expect(chunks).toEqual(["😀😀", "😀"]);
 	});
 });

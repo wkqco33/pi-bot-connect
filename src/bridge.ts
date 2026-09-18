@@ -8,6 +8,7 @@
 
 import { executeRemoteCommand, type RemoteCommandContext } from "./core/commands.js";
 import { capChunkCount, chunkForTransport } from "./core/chunk.js";
+import { chunkMarkdown } from "./core/markdown-blocks.js";
 import { renderMarkdown } from "./core/markdown.js";
 import {
 	ATTACHMENTS_UNSUPPORTED_NOTICE,
@@ -465,8 +466,18 @@ export class Bridge {
 			return null;
 		}
 
-		const rendered = renderMarkdown(redactSecrets(request.text), transport.capabilities.markdown);
-		const budget = capChunkCount(chunkForTransport(rendered, transport.capabilities), this.config.maxChunks);
+		const capabilities = transport.capabilities;
+		// Structure-aware split first: it has to see the CommonMark source, because
+		// transports that rewrite headings (`<b>`, `*`) would hide them. The
+		// limit-safe chunker then stays the hard guarantee for whatever rendering
+		// does to the size (html escaping grows, mrkdwn links shrink).
+		const budget = capChunkCount(
+			chunkMarkdown(redactSecrets(request.text), {
+				maxLength: capabilities.maxMessageLength,
+				unit: capabilities.lengthUnit,
+			}).flatMap((piece) => chunkForTransport(renderMarkdown(piece, capabilities.markdown), capabilities)),
+			this.config.maxChunks,
+		);
 		let first: SendReceipt | null = null;
 
 		for (const [index, chunk] of budget.chunks.entries()) {

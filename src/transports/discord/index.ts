@@ -42,7 +42,9 @@ export const DISCORD_CAPABILITIES: TransportCapabilities = {
 	reactions: false,
 	attachments: true,
 	maxMessageLength: 2000,
-	lengthUnit: "chars",
+	// Discord counts UTF-16 code units, so an emoji (a surrogate pair) costs two
+	// of the 2000 units.
+	lengthUnit: "utf16",
 	markdown: "markdown",
 	channels: true,
 };

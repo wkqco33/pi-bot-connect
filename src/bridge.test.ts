@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Bridge, MemoryBridgeStore, type BridgeHost } from "./bridge.js";
+import { measureLength } from "./core/chunk.js";
 import { createLogger, MemoryLogSink } from "./core/logger.js";
 import { ATTACHMENTS_UNSUPPORTED_NOTICE, ATTACHMENT_FETCH_FAILED_NOTICE, ATTACHMENT_NOT_AN_IMAGE_NOTICE, ATTACHMENT_TOO_LARGE_NOTICE, PAUSED_NOTICE } from "./core/notices.js";
 import {
@@ -324,6 +325,59 @@ describe("Bridge — outbound shaping", () => {
 		const { bridge, transport } = await setup({ maxChunks: 1 }, { maxMessageLength: 40 });
 		await bridge.send({ transport: "fake", conversationId: "conv-1", kind: "reply", text: "short" });
 		expect(transport.sent.map((message) => message.text)).toEqual(["short"]);
+	});
+
+	it("cuts a long reply at a heading instead of orphaning it", async () => {
+		const { bridge, transport } = await setup({}, { maxMessageLength: 100 });
+		const text = `## A\n\n${"a".repeat(80)}\n\n## B\n\n${"b".repeat(60)}\n`;
+		await bridge.send({ transport: "fake", conversationId: "conv-1", kind: "reply", text });
+		expect(transport.sent.map((message) => message.text)).toEqual([
+			`## A\n\n${"a".repeat(80)}\n\n`,
+			`## B\n\n${"b".repeat(60)}\n`,
+		]);
+	});
+
+	it("delivers the whole reply after a semantic split", async () => {
+		const { bridge, transport } = await setup({}, { maxMessageLength: 100 });
+		const text = `## A\n\n${"a".repeat(80)}\n\n## B\n\n${"b".repeat(60)}\n`;
+		await bridge.send({ transport: "fake", conversationId: "conv-1", kind: "reply", text });
+		expect(transport.sent.map((message) => message.text).join("")).toBe(text);
+	});
+
+	it("renders a heading in every semantic chunk for the transport's flavor", async () => {
+		const host = new FakeHost();
+		const bridge = new Bridge({ host, config: { requirePairing: false } });
+		const htmlTransport = new FakeTransport({
+			id: "html",
+			capabilities: { markdown: "html", maxMessageLength: 50 },
+		});
+		await bridge.register(htmlTransport);
+		const text = `## A\n\n${"x".repeat(30)}\n\n## B\n\n${"y".repeat(30)}\n`;
+		await bridge.send({ transport: "html", conversationId: "conv-1", kind: "reply", text });
+		expect(htmlTransport.sent.map((message) => message.text)).toEqual([
+			`<b>A</b>\n\n${"x".repeat(30)}\n\n`,
+			`<b>B</b>\n\n${"y".repeat(30)}\n`,
+		]);
+	});
+
+	it("keeps a rendered chunk within the limit when html escaping grows it", async () => {
+		const { bridge, transport } = await setup({}, { markdown: "html", maxMessageLength: 40 });
+		const text = `## A\n\n${"<".repeat(40)}\n`;
+		await bridge.send({ transport: "fake", conversationId: "conv-1", kind: "reply", text });
+		for (const message of transport.sent) {
+			expect(message.text.length).toBeLessThanOrEqual(40);
+		}
+		expect(transport.sent.map((message) => message.text).join("")).toBe(`<b>A</b>\n\n${"&lt;".repeat(40)}\n`);
+	});
+
+	it("counts UTF-16 units for a transport that declared them", async () => {
+		const { bridge, transport } = await setup({}, { lengthUnit: "utf16", maxMessageLength: 40 });
+		const text = `## A\n\n${"😀".repeat(40)}\n`;
+		await bridge.send({ transport: "fake", conversationId: "conv-1", kind: "reply", text });
+		for (const message of transport.sent) {
+			expect(measureLength(message.text, "utf16")).toBeLessThanOrEqual(40);
+		}
+		expect(transport.sent.map((message) => message.text).join("")).toBe(text);
 	});
 
 	it("renders the flavor each transport asked for", async () => {
