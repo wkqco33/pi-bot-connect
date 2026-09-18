@@ -130,7 +130,15 @@ let stateFile: string;
 /** Adapters opened by a test, shut down deterministically before cleanup. */
 const cleanups: Array<() => Promise<void>> = [];
 
+/**
+ * A developer following the README has this exported. Without this the registry
+ * auto-detects it, the adapter tests open a real gateway, and the suite fails on
+ * network/lock timing instead of on the code under test.
+ */
+const originalDiscordToken = process.env.PI_DISCORD_TOKEN;
+
 beforeEach(async () => {
+	delete process.env.PI_DISCORD_TOKEN;
 	dir = await mkdtemp(join(tmpdir(), "bot-connect-test-"));
 	configPath = join(dir, "config.json");
 	stateFile = join(dir, "state.json");
@@ -144,6 +152,8 @@ afterEach(async () => {
 	}
 	delete process.env.PI_BOT_CONNECT_CONFIG;
 	delete process.env.PI_BOT_CONNECT_STATE;
+	if (originalDiscordToken === undefined) delete process.env.PI_DISCORD_TOKEN;
+	else process.env.PI_DISCORD_TOKEN = originalDiscordToken;
 	await rm(dir, { recursive: true, force: true });
 });
 
