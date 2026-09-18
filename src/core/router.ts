@@ -141,5 +141,20 @@ function routeAuthenticated(input: RouterInput): RouterAction[] {
 }
 
 export function route(input: RouterInput): RouterAction[] {
-	return input.authenticated ? routeAuthenticated(input) : routePairing(input);
+	if (input.authenticated) return routeAuthenticated(input);
+
+	// A live challenge means this conversation is mid-handshake, and a pairing code
+	// is never a mention — so the code must be accepted even when unaddressed.
+	// Everything else in a channel must address the bot, otherwise a stranger could
+	// make it answer every line of chatter (I7).
+	const pending = input.pendingChallenge;
+	const midHandshake = pending !== undefined && input.now < pending.expiresAt;
+	if (!midHandshake) {
+		const incoming = normalizeIncoming(input.envelope, input.config);
+		if (input.config.requireAddressing && !incoming.addressed) {
+			return [{ type: "ignore", reason: "unaddressed" }];
+		}
+	}
+
+	return routePairing(input);
 }

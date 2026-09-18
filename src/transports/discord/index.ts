@@ -198,7 +198,11 @@ export class DiscordTransport implements Transport {
 			throw new Error(`attachment is ${buffer.byteLength} bytes, over the ${this.maxAttachmentBytes} byte limit`);
 		}
 
-		return { mediaType: attachment.mediaType, data: buffer.toString("base64") };
+		// The declared type came from the sender and is only a hint; the response
+		// header describes what was actually served.
+		const header = response.headers.get("content-type");
+		const served = header === null ? "" : (header.split(";")[0] ?? "").trim().toLowerCase();
+		return { mediaType: served.length > 0 ? served : attachment.mediaType, data: buffer.toString("base64") };
 	}
 
 	/**

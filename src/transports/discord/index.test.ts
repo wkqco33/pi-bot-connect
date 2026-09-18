@@ -355,6 +355,23 @@ describe("DiscordTransport — attachment download", () => {
 		expect(fetched).toEqual({ mediaType: "image/png", data: Buffer.from(bytes).toString("base64") });
 	});
 
+	it("uses the response content type as the authoritative media type", async () => {
+		const h = setup({
+			fetchImpl: () =>
+				Promise.resolve(
+					new Response(bytes, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } }),
+				),
+		});
+		const fetched = await h.transport.fetchAttachment(PNG_ATTACHMENT);
+		expect(fetched.mediaType).toBe("text/html");
+	});
+
+	it("falls back to the declared type when the response omits content-type", async () => {
+		const h = setup({ fetchImpl: () => Promise.resolve(new Response(bytes, { status: 200 })) });
+		const fetched = await h.transport.fetchAttachment(PNG_ATTACHMENT);
+		expect(fetched.mediaType).toBe("image/png");
+	});
+
 	it("rejects a non-ok response", async () => {
 		const h = setup({ fetchImpl: () => Promise.resolve(imageResponse(bytes, { status: 403 })) });
 		await expect(h.transport.fetchAttachment(PNG_ATTACHMENT)).rejects.toThrow(/status 403/);

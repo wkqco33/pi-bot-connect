@@ -364,6 +364,13 @@ export class Bridge {
 					await this.reply(envelope, ATTACHMENT_FETCH_FAILED_NOTICE);
 					return;
 				}
+				// The declared media type is a hint; the transport reports what was
+				// actually served. Re-check the real type before the model sees it.
+				if (!this.config.attachments.allowedMediaTypes.includes(result.mediaType)) {
+					this.host.logger.warn("attachment rejected after download", { mediaType: result.mediaType });
+					await this.reply(envelope, ATTACHMENT_NOT_AN_IMAGE_NOTICE);
+					return;
+				}
 				// Base64 is 4/3 of the byte length. Re-checked here because the size the
 				// messenger declared is a hint, not a guarantee.
 				if (Math.ceil((result.data.length * 3) / 4) > this.config.attachments.maxBytes) {

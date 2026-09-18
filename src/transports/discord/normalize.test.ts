@@ -29,6 +29,39 @@ function envelopeOf(payload: unknown): Envelope {
 	return result.envelope;
 }
 
+describe("normalizeDiscordMessage — addressing", () => {
+	it("treats a reply to the bot as addressed in a guild channel", () => {
+		const envelope = envelopeOf(
+			message({
+				content: "carry on",
+				type: 19,
+				message_reference: { message_id: "m0" },
+				referenced_message: { id: "m0", author: { id: BOT_ID } },
+			}),
+		);
+		expect(envelope.addressed).toBe(true);
+	});
+
+	it("does not treat a reply to another user as addressing the bot", () => {
+		const envelope = envelopeOf(
+			message({
+				content: "carry on",
+				type: 19,
+				message_reference: { message_id: "m0" },
+				referenced_message: { id: "m0", author: { id: "user-2" } },
+			}),
+		);
+		expect(envelope.addressed).toBe(false);
+	});
+
+	it("does not treat a reply as addressed when the referenced author is missing", () => {
+		const envelope = envelopeOf(
+			message({ content: "carry on", type: 19, message_reference: { message_id: "m0" } }),
+		);
+		expect(envelope.addressed).toBe(false);
+	});
+});
+
 describe("stripBotMentions", () => {
 	it("reports no mention and trims when the bot is not mentioned", () => {
 		expect(stripBotMentions("  fix the tests  ", BOT_ID)).toEqual({ text: "fix the tests", mentioned: false });

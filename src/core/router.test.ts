@@ -107,6 +107,32 @@ describe("route — pairing", () => {
 		const actions = routeEnvelope("delete everything", {}, { authenticated: false });
 		expect(actions.every((action) => action.type !== "prompt")).toBe(true);
 	});
+
+	it("ignores unaddressed channel chatter before pairing", () => {
+		const actions = routeEnvelope("just chatting", { isDirect: false }, { authenticated: false });
+		expect(actions).toEqual([{ type: "ignore", reason: "unaddressed" }]);
+	});
+
+	it("still challenges an addressed message from an unknown user", () => {
+		const actions = routeEnvelope("@piBot hello", { isDirect: false }, { authenticated: false });
+		expect(actions[0]).toMatchObject({ type: "pair-required", reason: "new" });
+	});
+
+	it("accepts an unaddressed pairing code once a challenge is live", () => {
+		const actions = routeEnvelope("000000", { isDirect: false }, {
+			authenticated: false,
+			pendingChallenge: { code: "000000", expiresAt: 2_000, attempts: 0 },
+		});
+		expect(actions).toEqual([{ type: "pair" }]);
+	});
+
+	it("ignores chatter again once the challenge has expired", () => {
+		const actions = routeEnvelope("just chatting", { isDirect: false }, {
+			authenticated: false,
+			pendingChallenge: { code: "000000", expiresAt: 500, attempts: 0 },
+		});
+		expect(actions).toEqual([{ type: "ignore", reason: "unaddressed" }]);
+	});
 });
 
 describe("route — commands and prompts", () => {

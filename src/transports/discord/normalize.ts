@@ -81,6 +81,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * True when the message replies to one of the bot's own messages. Discord only
+ * includes `referenced_message` when it can resolve it, so this is best-effort:
+ * a missing reference means "not addressed", never a crash.
+ */
+function repliesToBot(payload: Record<string, unknown>, botId: string): boolean {
+	const referenced = payload.referenced_message;
+	if (!isRecord(referenced)) return false;
+	const author = referenced.author;
+	return isRecord(author) && author.id === botId;
+}
+
 export function normalizeDiscordMessage(payload: unknown, options: NormalizeOptions): NormalizeResult {
 	if (!isRecord(payload)) return { kind: "skip", reason: "not-a-message" };
 
@@ -118,7 +130,7 @@ export function normalizeDiscordMessage(payload: unknown, options: NormalizeOpti
 		conversationId: channelId,
 		userId: authorId,
 		isDirect,
-		addressed: isDirect || stripped.mentioned,
+		addressed: isDirect || stripped.mentioned || repliesToBot(payload, options.botId),
 		timestamp: Number.isFinite(parsedTimestamp) ? parsedTimestamp : 0,
 		text: stripped.text,
 		...(attachments.length > 0 ? { attachments } : {}),

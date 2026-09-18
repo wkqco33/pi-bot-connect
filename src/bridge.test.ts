@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Bridge, MemoryBridgeStore, type BridgeHost } from "./bridge.js";
 import { createLogger, MemoryLogSink } from "./core/logger.js";
-import { ATTACHMENTS_UNSUPPORTED_NOTICE, ATTACHMENT_FETCH_FAILED_NOTICE, ATTACHMENT_TOO_LARGE_NOTICE, PAUSED_NOTICE } from "./core/notices.js";
+import { ATTACHMENTS_UNSUPPORTED_NOTICE, ATTACHMENT_FETCH_FAILED_NOTICE, ATTACHMENT_NOT_AN_IMAGE_NOTICE, ATTACHMENT_TOO_LARGE_NOTICE, PAUSED_NOTICE } from "./core/notices.js";
 import {
 	noopLogger,
 	type BridgeConfig,
@@ -227,6 +227,24 @@ describe("Bridge — routing", () => {
 		await transport.inject({ text: "just chatting", isDirect: false });
 		expect(host.prompts).toEqual([]);
 		expect(transport.sent).toEqual([]);
+	});
+
+	it("ignores unauthenticated channel chatter instead of challenging it", async () => {
+		const { host, transport } = await setup({ botUsername: "piBot" }, {}, { pair: false });
+		await transport.inject({ text: "just chatting", isDirect: false });
+		expect(host.prompts).toEqual([]);
+		expect(transport.sent).toEqual([]);
+	});
+
+	it("refuses an attachment whose real media type is not allowed", async () => {
+		const { host, transport } = await setup({}, {}, {
+			attachmentResolver: () => Promise.resolve({ mediaType: "text/html", data: "PGh0bWw+" }),
+		});
+		host.acceptsAttachments = true;
+		await transport.inject({ text: "what is this?", attachments: [PNG] });
+
+		expect(transport.lastSent?.text).toBe(ATTACHMENT_NOT_AN_IMAGE_NOTICE);
+		expect(host.prompts).toEqual([]);
 	});
 
 	it("strips an addressing mention before forwarding", async () => {
