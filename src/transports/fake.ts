@@ -36,6 +36,11 @@ export interface FakeTransportOptions {
 	 * transport that cannot carry attachments at all.
 	 */
 	readonly attachmentResolver?: (attachment: InboundAttachment) => Promise<FetchedAttachment>;
+	/**
+	 * Whether this transport exposes a typing indicator. Defaults to true so the
+	 * bridge's hint path is exercised; set false to model a transport that has none.
+	 */
+	readonly typing?: boolean;
 }
 
 export class FakeTransport implements Transport {
@@ -50,6 +55,10 @@ export class FakeTransport implements Transport {
 	failEdits = false;
 	/** Only defined when `attachmentResolver` was provided. */
 	readonly fetchAttachment?: (attachment: InboundAttachment) => Promise<FetchedAttachment>;
+	/** Channels the bridge asked to show a typing indicator for. */
+	readonly typingCalls: string[] = [];
+	/** Only defined when `typing` was not disabled. Mutable so a test can fail it. */
+	typing?: (conversationId: string) => Promise<void>;
 
 	private handler: EnvelopeHandler | null = null;
 	private counter = 0;
@@ -60,6 +69,12 @@ export class FakeTransport implements Transport {
 		const resolver = options.attachmentResolver;
 		if (resolver !== undefined) {
 			this.fetchAttachment = (attachment) => resolver(attachment);
+		}
+		if (options.typing !== false) {
+			this.typing = (conversationId) => {
+				this.typingCalls.push(conversationId);
+				return Promise.resolve();
+			};
 		}
 	}
 

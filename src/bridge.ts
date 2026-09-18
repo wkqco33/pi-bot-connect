@@ -7,7 +7,7 @@
  */
 
 import { executeRemoteCommand, type RemoteCommandContext } from "./core/commands.js";
-import { chunkForTransport } from "./core/chunk.js";
+import { capChunkCount, chunkForTransport } from "./core/chunk.js";
 import { renderMarkdown } from "./core/markdown.js";
 import {
 	ATTACHMENTS_UNSUPPORTED_NOTICE,
@@ -16,9 +16,11 @@ import {
 	ATTACHMENT_TOO_LARGE_NOTICE,
 	ATTACHMENT_TOO_MANY_NOTICE,
 	PAUSED_NOTICE,
+	truncatedNotice,
 	unknownCommandNotice,
 } from "./core/notices.js";
 import { isFreshChallenge, pairingCodeNotice, pairingPrompt, pairingSuccessPrompt, type PendingChallenge } from "./core/pairing.js";
+import { thinkingLabel } from "./core/progress.js";
 import { redactSecrets } from "./core/redact.js";
 import { route, type UnsupportedFeature } from "./core/router.js";
 import {
@@ -378,6 +380,11 @@ export class Bridge {
 			...(images === undefined ? {} : { images }),
 		};
 		this.host.sendPrompt(action.text, Object.keys(options).length > 0 ? options : undefined);
+		await this.notifyTyping({
+			transport: envelope.transport,
+			conversationId: envelope.conversationId,
+			...(envelope.threadId === undefined ? {} : { threadId: envelope.threadId }),
+		});
 		this.host.logger.info("prompt forwarded", {
 			transport: envelope.transport,
 			deliverAs: action.deliverAs ?? "immediate",
@@ -452,10 +459,10 @@ export class Bridge {
 		}
 
 		const rendered = renderMarkdown(redactSecrets(request.text), transport.capabilities.markdown);
-		const chunks = chunkForTransport(rendered, transport.capabilities);
+		const budget = capChunkCount(chunkForTransport(rendered, transport.capabilities), this.config.maxChunks);
 		let first: SendReceipt | null = null;
 
-		for (const [index, chunk] of chunks.entries()) {
+		for (const [index, chunk] of budget.chunks.entries()) {
 			const receipt = await transport.send({
 				conversationId: request.conversationId,
 				kind: request.kind,
@@ -466,6 +473,17 @@ export class Bridge {
 				...(request.threadId === undefined ? {} : { threadId: request.threadId }),
 			});
 			if (first === null) first = receipt;
+		}
+
+		if (budget.dropped > 0) {
+			// Posted as its own message, without the edit handle: editing it would
+			// replace the first chunk and leave the delivered tail stale.
+			await transport.send({
+				conversationId: request.conversationId,
+				kind: request.kind,
+				text: truncatedNotice(budget.dropped),
+				...(request.threadId === undefined ? {} : { threadId: request.threadId }),
+			});
 		}
 
 		return first;
@@ -482,6 +500,19 @@ export class Bridge {
 	}
 
 	/**
+	 * Posts the first card of a turn ("thinking…").
+	 *
+	 * It deliberately does not consume the throttle budget: the first tool event
+	 * of the turn must still land, and on an editable transport both update the
+	 * same card.
+	 */
+	async publishTurnStart(): Promise<number> {
+		const delivered = await this.publishProgressToConversations(thinkingLabel());
+		this.lastProgressAt = Number.NEGATIVE_INFINITY;
+		return delivered;
+	}
+
+	/**
 	 * Publishes a coalesced progress update, throttled and edited in place on
 	 * transports that support editing. Without this a long turn would post one
 	 * chat message per tool call.
@@ -490,17 +521,36 @@ export class Bridge {
 		const now = this.host.now();
 		if (now - this.lastProgressAt < this.config.progressMinIntervalMs) return 0;
 		this.lastProgressAt = now;
+		return this.publishProgressToConversations(text);
+	}
 
+	private async publishProgressToConversations(text: string): Promise<number> {
 		let delivered = 0;
 		for (const target of this.store.listConversations()) {
 			const key = `${target.transport}:${target.conversationId}`;
 			if (this.store.isPaused(key)) continue;
 			const transport = this.transports.get(target.transport);
 			if (!transport) continue;
+			await this.notifyTyping(target);
 			await this.sendProgress(target, transport, text);
 			delivered++;
 		}
 		return delivered;
+	}
+
+	/**
+	 * Best-effort "the bot is working" hint. A transport without an indicator, or
+	 * one that rejects, must never turn a progress update into a failed turn.
+	 */
+	private async notifyTyping(target: ConversationTarget): Promise<void> {
+		const transport = this.transports.get(target.transport);
+		const typing = transport?.typing?.bind(transport);
+		if (typing === undefined) return;
+		try {
+			await typing(target.conversationId);
+		} catch (error) {
+			this.host.logger.debug("typing hint failed", { transport: target.transport, error: String(error) });
+		}
 	}
 
 	private async sendProgress(target: ConversationTarget, transport: Transport, text: string): Promise<void> {

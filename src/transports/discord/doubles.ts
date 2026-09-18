@@ -185,6 +185,7 @@ export class FakeRest implements DiscordApi {
 	identityError: Error | null = null;
 	readonly created: Array<{ channelId: string; content: string }> = [];
 	readonly edited: Array<{ channelId: string; messageId: string; content: string }> = [];
+	readonly typings: string[] = [];
 	identityCalls = 0;
 
 	getBotIdentity(): Promise<DiscordBotIdentity> {
@@ -204,6 +205,11 @@ export class FakeRest implements DiscordApi {
 
 	editMessage(channelId: string, messageId: string, content: string): Promise<void> {
 		this.edited.push({ channelId, messageId, content });
+		return Promise.resolve();
+	}
+
+	triggerTyping(channelId: string): Promise<void> {
+		this.typings.push(channelId);
 		return Promise.resolve();
 	}
 }

@@ -279,6 +279,44 @@ describe("DiscordTransport — outbound", () => {
 	});
 });
 
+describe("DiscordTransport — typing indicator", () => {
+	it("triggers the typing indicator for a channel", async () => {
+		const h = setup();
+		await startReady(h);
+		await h.transport.typing("chan-1");
+		expect(h.rest.typings).toEqual(["chan-1"]);
+	});
+
+	it("does not call the API before the transport is started", async () => {
+		const h = setup();
+		await h.transport.typing("chan-1");
+		expect(h.rest.typings).toEqual([]);
+	});
+
+	it("throttles repeated hints for the same channel", async () => {
+		let now = 0;
+		const h = setup({ now: () => now, typingMinIntervalMs: 8_000 });
+		await startReady(h);
+
+		await h.transport.typing("chan-1");
+		now += 1_000;
+		await h.transport.typing("chan-1");
+		expect(h.rest.typings).toEqual(["chan-1"]);
+
+		now += 8_000;
+		await h.transport.typing("chan-1");
+		expect(h.rest.typings).toEqual(["chan-1", "chan-1"]);
+	});
+
+	it("throttles each channel independently", async () => {
+		const h = setup({ now: () => 0, typingMinIntervalMs: 8_000 });
+		await startReady(h);
+		await h.transport.typing("chan-1");
+		await h.transport.typing("chan-2");
+		expect(h.rest.typings).toEqual(["chan-1", "chan-2"]);
+	});
+});
+
 describe("DiscordTransport — diagnostics", () => {
 	it("never renders the token", async () => {
 		const h = setup();

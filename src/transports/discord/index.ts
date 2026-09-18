@@ -28,6 +28,13 @@ import { DiscordRest, type DiscordApi } from "./rest.js";
 /** Discord's own CDN limit for a bot upload; used as the default download cap. */
 export const DEFAULT_MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 
+/**
+ * How often one channel may be told "typing". Discord expires the indicator
+ * after ~10 seconds and rate-limits the endpoint, so hints are throttled below
+ * that window rather than fired on every progress update.
+ */
+export const DEFAULT_TYPING_MIN_INTERVAL_MS = 8_000;
+
 /** Discord's real limits, as of API v10. */
 export const DISCORD_CAPABILITIES: TransportCapabilities = {
 	threads: false,
@@ -53,6 +60,10 @@ export interface DiscordTransportOptions {
 	/** Cap for a downloaded attachment. Discord's own CDN limit is 25 MB. */
 	readonly maxAttachmentBytes?: number;
 	readonly fetchImpl?: typeof fetch;
+	/** Minimum gap between typing hints for the same channel. */
+	readonly typingMinIntervalMs?: number;
+	/** Injected for deterministic typing-throttle tests. */
+	readonly now?: () => number;
 }
 
 export class DiscordTransport implements Transport {
@@ -64,6 +75,10 @@ export class DiscordTransport implements Transport {
 	private readonly scheduler: GatewayScheduler;
 	private readonly fetchImpl: typeof fetch;
 	private readonly maxAttachmentBytes: number;
+	private readonly typingMinIntervalMs: number;
+	private readonly now: () => number;
+	/** Last time each channel was told "typing", keyed by channel id. */
+	private readonly typingAt = new Map<string, number>();
 
 	private handler: EnvelopeHandler | null = null;
 	private gateway: DiscordGateway | null = null;
@@ -81,6 +96,8 @@ export class DiscordTransport implements Transport {
 		this.scheduler = options.scheduler ?? systemScheduler;
 		this.fetchImpl = options.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
 		this.maxAttachmentBytes = options.maxAttachmentBytes ?? DEFAULT_MAX_ATTACHMENT_BYTES;
+		this.typingMinIntervalMs = options.typingMinIntervalMs ?? DEFAULT_TYPING_MIN_INTERVAL_MS;
+		this.now = options.now ?? Date.now;
 	}
 
 	async start(handler: EnvelopeHandler): Promise<void> {
@@ -182,6 +199,20 @@ export class DiscordTransport implements Transport {
 		}
 
 		return { mediaType: attachment.mediaType, data: buffer.toString("base64") };
+	}
+
+	/**
+	 * Shows Discord's typing indicator while the agent works. Best-effort: the
+	 * bridge swallows failures, and repeated hints for one channel are throttled
+	 * locally so a busy turn cannot hammer the endpoint.
+	 */
+	async typing(conversationId: string): Promise<void> {
+		if (this.handler === null) return;
+		const now = this.now();
+		const last = this.typingAt.get(conversationId);
+		if (last !== undefined && now - last < this.typingMinIntervalMs) return;
+		this.typingAt.set(conversationId, now);
+		await this.rest.triggerTyping(conversationId);
 	}
 
 	/** Health detail for `/connect doctor`. Never contains the token. */

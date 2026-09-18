@@ -22,6 +22,7 @@ import { buildWorkDigest } from "./core/digest.js";
 import type { DigestFileChange } from "./core/digest.js";
 import { extractAssistantText, extractToolText, summarize } from "./core/message.js";
 import { formatChallengeCode } from "./core/pairing.js";
+import { toolEndLabel, toolStartLabel } from "./core/progress.js";
 import { resolveConfig, type BridgeConfig, type Logger, type PromptImage } from "./core/types.js";
 import { parseGitBranch, parseGitNumstat, summarizeTestRun } from "./core/work.js";
 import { FileBridgeStore } from "./file-store.js";
@@ -502,8 +503,10 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 	pi.on("agent_start", async (_event, ctx) => {
 		sessionCtx = ctx;
 		lastAssistantText = "";
-		// A new turn gets a new progress card instead of editing the last one.
+		// A new turn gets a new progress card instead of editing the last one, and
+		// the card says what is happening while the model reasons (no tool events).
 		bridge?.beginTurn();
+		await bridge?.publishTurnStart();
 	});
 
 	pi.on("tool_execution_start", async (event, ctx) => {
@@ -514,7 +517,7 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 		}
 		// Only the tool *name* is ever sent: arguments routinely carry paths, tokens
 		// and file contents. The bridge throttles and edits one card per turn.
-		await bridge?.publishProgress(`▶ ${event.toolName}`);
+		await bridge?.publishProgress(toolStartLabel(event.toolName));
 	});
 
 	pi.on("tool_execution_end", async (event, ctx) => {
@@ -529,7 +532,7 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 			}
 		}
 
-		await bridge?.publishProgress(`${event.isError === true ? "✕" : "✓"} ${event.toolName}`);
+		await bridge?.publishProgress(toolEndLabel(event.toolName, event.isError !== true));
 	});
 
 	pi.on("message_end", async (event, ctx) => {
@@ -543,9 +546,11 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 		sessionCtx = ctx;
 		runningTool = undefined;
 		ctx.ui.setStatus(COMMAND_KEY, statusLabel());
-		if (!bridge || lastAssistantText.length === 0) return;
-		const summary = summarize(lastAssistantText, 1200);
+		const text = lastAssistantText;
 		lastAssistantText = "";
-		await bridge.publish("reply", summary);
+		if (!bridge || text.length === 0) return;
+		// The bridge redacts, renders and splits to the transport's limit, so the
+		// full answer goes out instead of a summary truncated to fit one message.
+		await bridge.publish("reply", text);
 	});
 }

@@ -23,6 +23,7 @@ export interface DiscordApi {
 	resolveGatewayUrl(): Promise<string>;
 	createMessage(channelId: string, content: string): Promise<{ id: string }>;
 	editMessage(channelId: string, messageId: string, content: string): Promise<void>;
+	triggerTyping(channelId: string): Promise<void>;
 }
 
 export interface DiscordRestOptions {
@@ -93,6 +94,11 @@ export class DiscordRest implements DiscordApi {
 			`/channels/${encodeURIComponent(channelId)}/messages/${encodeURIComponent(messageId)}`,
 			{ method: "PATCH", body: JSON.stringify({ content }) },
 		);
+	}
+
+	/** Shows the "bot is typing" indicator, which Discord clears after ~10 seconds. */
+	async triggerTyping(channelId: string): Promise<void> {
+		await this.request(`/channels/${encodeURIComponent(channelId)}/typing`, { method: "POST" });
 	}
 
 	// --- internals -----------------------------------------------------------

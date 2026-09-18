@@ -126,6 +126,7 @@ async function setup(
 	options: {
 		pair?: boolean;
 		attachmentResolver?: (attachment: InboundAttachment) => Promise<FetchedAttachment>;
+		typing?: boolean;
 	} = {},
 ): Promise<Harness> {
 	const host = new FakeHost();
@@ -134,6 +135,7 @@ async function setup(
 	const transport = new FakeTransport({
 		capabilities,
 		...(options.attachmentResolver === undefined ? {} : { attachmentResolver: options.attachmentResolver }),
+		...(options.typing === undefined ? {} : { typing: options.typing }),
 	});
 	await bridge.register(transport);
 	if (options.pair !== false) {
@@ -281,6 +283,29 @@ describe("Bridge — outbound shaping", () => {
 			expect(message.text.length).toBeLessThanOrEqual(40);
 		}
 		expect(transport.sent.map((message) => message.text).join("")).toBe(text);
+	});
+
+	it("delivers every chunk when the output fits the chunk budget", async () => {
+		const { bridge, transport } = await setup({ maxChunks: 5 }, { maxMessageLength: 10 });
+		await bridge.send({ transport: "fake", conversationId: "conv-1", kind: "reply", text: "abcde fghij" });
+		expect(transport.sent.map((message) => message.text).join("")).toBe("abcde fghij");
+		expect(transport.lastSent?.text).not.toContain("truncated");
+	});
+
+	it("stops at the chunk budget and says how much was dropped", async () => {
+		const { bridge, transport } = await setup({ maxChunks: 2 }, { maxMessageLength: 5 });
+		await bridge.send({ transport: "fake", conversationId: "conv-1", kind: "reply", text: "abcdefghijklmno" });
+		expect(transport.sent.map((message) => message.text)).toEqual([
+			"abcde",
+			"fghij",
+			"[truncated: 1 more message(s) were not sent]",
+		]);
+	});
+
+	it("never truncates a single-chunk reply when the budget is one", async () => {
+		const { bridge, transport } = await setup({ maxChunks: 1 }, { maxMessageLength: 40 });
+		await bridge.send({ transport: "fake", conversationId: "conv-1", kind: "reply", text: "short" });
+		expect(transport.sent.map((message) => message.text)).toEqual(["short"]);
 	});
 
 	it("renders the flavor each transport asked for", async () => {
@@ -488,6 +513,66 @@ describe("Bridge — progress card", () => {
 		bridge.beginTurn();
 		expect(await bridge.publishProgress("▶ bash")).toBe(0);
 		expect(transport.sent).toEqual([]);
+	});
+});
+
+describe("Bridge — turn start", () => {
+	it("posts a thinking card and still lets the first tool update through", async () => {
+		const { bridge, transport } = await setup({ progressMinIntervalMs: 60_000 }, { edit: true });
+		await transport.inject({ text: "start" });
+		transport.sent.length = 0;
+		transport.edits.length = 0;
+
+		bridge.beginTurn();
+		expect(await bridge.publishTurnStart()).toBe(1);
+		expect(await bridge.publishProgress("▶ bash")).toBe(1);
+
+		expect(transport.sent.map((message) => message.text)).toEqual(["thinking…"]);
+		expect(transport.edits.map((message) => message.text)).toEqual(["▶ bash"]);
+	});
+
+	it("does not post a turn-start card to a paused conversation", async () => {
+		const { bridge, transport } = await setup({}, { edit: true });
+		await transport.inject({ text: "start" });
+		await transport.inject({ text: "/pause" });
+		transport.sent.length = 0;
+
+		bridge.beginTurn();
+		expect(await bridge.publishTurnStart()).toBe(0);
+		expect(transport.sent).toEqual([]);
+	});
+});
+
+describe("Bridge — typing hint", () => {
+	it("hints typing when a prompt is forwarded", async () => {
+		const { transport } = await setup();
+		await transport.inject({ text: "do work" });
+		expect(transport.typingCalls).toEqual(["conv-1"]);
+	});
+
+	it("hints typing on every delivered progress update", async () => {
+		const { bridge, transport } = await setup();
+		await transport.inject({ text: "start" });
+		transport.typingCalls.length = 0;
+
+		bridge.beginTurn();
+		await bridge.publishProgress("▶ bash");
+		expect(transport.typingCalls).toEqual(["conv-1"]);
+	});
+
+	it("does not hint typing when the transport has no indicator", async () => {
+		const { host, transport } = await setup({}, {}, { typing: false });
+		expect(transport.typing).toBeUndefined();
+		await transport.inject({ text: "do work" });
+		expect(host.prompts).toEqual([{ text: "do work" }]);
+	});
+
+	it("keeps delivering when the typing hint rejects", async () => {
+		const { host, transport } = await setup();
+		transport.typing = () => Promise.reject(new Error("rate limited"));
+		await transport.inject({ text: "do work" });
+		expect(host.prompts).toEqual([{ text: "do work" }]);
+		expect(host.notifications).toEqual([]);
 	});
 });
 
