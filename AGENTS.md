@@ -346,6 +346,8 @@ import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 | 첨부 크기를 선언값만 믿음 | `content-length`는 힌트다. 실제로 더 큰 파일이 올 수 있다 | 다운로드 후 base64 길이로 다시 검사 (`bridge.ts`, `discord/index.ts`) |
 | 스트리밍 중 진행 상황을 매 툴마다 새 메시지로 | 채팅 도배, 레이트리밋 | `publishProgress`가 스로틀 + `editKey`로 같은 카드 갱신. 턴마다 `beginTurn()` |
 | 테스트 러너 출력을 추측으로 파싱 | 버전이 바뀌면 조용히 틀린다 | `core/work.ts`의 패턴을 fixture로 고정하고, 못 찾으면 exit status로 폴백 |
+| **발행 직후 레지스트리 조회가 404/누락** | 발행이 실패한 줄 알고 되돌리려 함 | npm 전파에 몇 분 걸린다. **진짜는 워크플로 로그**다: `Publishing to … with tag …`, `Signed provenance statement`, `+ pkg@version`을 확인하고 `npm dist-tag ls`로 재확인하라 |
+| 이미 발행된 버전에 태그를 붙여 재발행 시도 | npm이 거부한다. provenance는 다시 쓸 수 없다 | `release.yml`이 발행 전에 레지스트리를 확인해 이미 있으면 publish를 건너뛰고 GitHub Release만 만든다 |
 
 ---
 
@@ -409,6 +411,9 @@ docs(agents): document the transport conformance checklist
 | Telegram · Slack 전송 | ❌ 미구현 |
 | TODO를 다이제스트에 포함 | ❌ 미구현 — 어떤 TODO 확장의 형태를 읽을지 결정 필요 |
 | 프롬프트 인젝션 방어 | ❌ 미구현 (G1) |
+| npm 배포 | ✅ 0.1.0 공개. 다음 릴리스는 `package.json`의 `0.1.1`을 태그하면 CI가 provenance와 함께 발행 |
+| CI / 릴리스 파이프라인 | ✅ `master` push + PR에서 CI, `v*` 태그에서 OIDC 발행. `0.1.1-rc.1`로 검증 완료 |
+| **실제 Discord 왕복** | ❌ 미검증 — 폐쇄망으로 보류. 첫 실사용이 진짜 통합 테스트 |
 
 전체 로드맵과 미해결 과제: `docs/architecture.md` §9, `docs/feasibility.md` §6.
 
@@ -447,6 +452,8 @@ docs/             분석·아키텍처 문서
 - `0.y.z` 동안 공개 표면(설정 스키마·원격 명령 집합·`Transport` 계약)은 MINOR에서 바뀔 수 있다. README와 CHANGELOG에 이 사실을 유지한다
 - `Transport`에 **필수** 멤버를 추가하는 것은 breaking이다. 선택 멤버 추가는 아니다
 - 설정 파일에 키를 추가하는 것은 additive이며 항상 기본값을 제공한다
+- **프리릴리스는 `next` dist-tag로 발행된다** (`0.1.1-rc.1`처럼 하이픈이 있으면). `latest`를 덮지 않는다
+- 이미 발행된 버전은 재발행할 수 없고 provenance도 다시 쓸 수 없다. 버전을 올려서 내라
 
 ### 절차
 
@@ -493,6 +500,19 @@ GitHub Release만 만든다. 이미 발행된 버전은 재발행이 거부되�
 | **trusted publishing (OIDC)** | 토큰이 없다. npmjs.com의 패키지 설정에서 Trusted Publisher로 이 저장소와 **workflow 파일명 `release.yml`, environment `npm`**을 등록한다. npm >= 11.5.1이 필요해 워크플로가 자동으로 올린다 |
 
 장기 토큰이 없으므로 **trusted publishing이 더 낫다.** 다만 패키지가 npm에 존재한 뒤에만 설정할 수 있어서, 첫 발행은 토큰이나 로컬 `npm publish`로 해야 한다.
+
+**현재 이 저장소는 trusted publishing으로 동작한다** (secret 없음 → OIDC 경로). `0.1.1-rc.1`로 검증했고 다음이 확인되었다:
+
+```
+Publishing to https://registry.npmjs.org/ with tag next and public access
+publish Signed provenance statement with source and build information from GitHub Actions
+publish Provenance statement published to transparency log: logIndex=…
++ pi-bot-connect@0.1.1-rc.1
+```
+
+소비자 측 검증(`npm audit signatures`)도 통과하고, attestation에 `repo`·`workflow path`·`ref`가 기록된다.
+**environment 이름은 반드시 npmjs.com 설정과 일치해야 한다.** OIDC subject에 포함되므로
+불일치하면 발행이 거부된다 (`environment: npm`이면 npmjs.com도 `npm`).
 
 공급망 보호 조치 (바꾸지 말 것):
 
