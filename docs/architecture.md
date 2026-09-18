@@ -104,7 +104,7 @@ interface Transport {
 | `core/*` | 순수 함수 단위 테스트. 결정적 rng/clock 주입 | 137+ 테스트 |
 | `bridge.ts` | `FakeTransport` + `FakeHost`로 전 구간 시나리오 | 26 테스트 |
 | `config.ts` | 신뢰할 수 없는 JSON 검증 테이블 테스트 | 18 테스트 |
-| `index.ts` | 타입체크만. **커버리지 제외** | 수동 스모크 |
+| `index.ts` | 타입체크 + 배선 테스트(가짜 `ExtensionAPI`로 팩토리 구동). **커버리지 제외** | 22 테스트 |
 | `transports/*` | 계약 conformance + 플랫폼별 payload fixture | v1 |
 
 ### 4.2 결정성 확보 방법
@@ -190,6 +190,8 @@ const decision = decidePairing({ ..., now: 10, random: digitSequence("987654") }
 ~/.pi/agent/bot-connect.json      # 전역
 <project>/.pi/bot-connect.json    # 프로젝트
 ```
+
+`PI_BOT_CONNECT_CONFIG=<path>`가 설정되면 위 탐색을 **건너뛰고** 그 파일만 읽는다. 테스트/CI용이며, 개발자의 전역 설정이 테스트에 새어 들어오는 것을 막는다.
 
 ```jsonc
 {

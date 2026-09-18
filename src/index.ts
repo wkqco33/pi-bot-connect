@@ -48,17 +48,22 @@ interface LoadedConfig {
 	readonly notes: readonly string[];
 }
 
-async function readJsonFile(path: string): Promise<unknown | undefined> {
+type JsonReadResult =
+	| { readonly ok: true; readonly value: unknown }
+	| { readonly ok: false; readonly error: string };
+
+async function readJsonFile(path: string): Promise<JsonReadResult | undefined> {
+	let raw: string;
 	try {
-		const raw = await readFile(path, "utf8");
-		try {
-			return JSON.parse(raw) as unknown;
-		} catch {
-			return { __parseError: `invalid JSON in ${path}` };
-		}
+		raw = await readFile(path, "utf8");
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-		throw error;
+		return { ok: false, error: `cannot read ${path}: ${String(error)}` };
+	}
+	try {
+		return { ok: true, value: JSON.parse(raw) as unknown };
+	} catch (error) {
+		return { ok: false, error: `invalid JSON in ${path}: ${String(error)}` };
 	}
 }
 
@@ -69,20 +74,36 @@ function configPaths(cwd: string): { global: string; project: string } {
 	};
 }
 
+/**
+ * `PI_BOT_CONNECT_CONFIG` replaces config discovery entirely. It exists so tests
+ * and CI can run without depending on a developer's real global config.
+ */
+function configSources(cwd: string): ReadonlyArray<readonly [string, string]> {
+	const override = process.env.PI_BOT_CONNECT_CONFIG;
+	if (override !== undefined && override.length > 0) {
+		return [["override", override]];
+	}
+	const paths = configPaths(cwd);
+	return [
+		["global", paths.global],
+		["project", paths.project],
+	];
+}
+
 /** Global config first, project config second (project wins). */
 async function loadBridgeConfig(cwd: string): Promise<LoadedConfig> {
-	const paths = configPaths(cwd);
 	const notes: string[] = [];
 	let merged: Partial<BridgeConfig> = {};
 	let transports: Record<string, unknown> = {};
 
-	for (const [scope, path] of [
-		["global", paths.global],
-		["project", paths.project],
-	] as const) {
+	for (const [scope, path] of configSources(cwd)) {
 		const raw = await readJsonFile(path);
 		if (raw === undefined) continue;
-		const parsed = parseConfigFile(raw);
+		if (!raw.ok) {
+			notes.push(`${scope} config: ${raw.error}`);
+			continue;
+		}
+		const parsed = parseConfigFile(raw.value);
 		for (const error of parsed.errors) notes.push(`${scope} config: ${error}`);
 		for (const warning of parsed.warnings) notes.push(`${scope} config: ${warning}`);
 		merged = { ...merged, ...parsed.config };

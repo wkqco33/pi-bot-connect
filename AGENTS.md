@@ -82,6 +82,7 @@ pi.on("tool_execution_start", async (event, ctx) => {
 
 **"이 `if`는 정책인가?"** → 그렇다면 코어로 옮기고 테스트를 쓴다.
 `src/index.ts`는 커버리지에서 제외되어 있으므로, 여기 있는 로직은 **아무도 지켜주지 않는다**.
+예외는 `src/index.test.ts`(배선 테스트 22개)다. 이 테스트는 팩토리를 가짜 `ExtensionAPI`로 구동해 **이벤트 이름·명령 등록·설정 오류 전파**를 검증한다. 로직을 검증하려는 테스트를 여기 추가하려 한다면, 그 로직을 먼저 코어로 옮겨라.
 
 ### R5. 보안 불변식을 깨지 않는다
 
@@ -115,6 +116,16 @@ PI_BOT_CONNECT_DEBUG=1 pi -e ./src/index.ts   # 어댑터 로그 활성화
 
 `pi -e`는 확장을 즉시 로드한다. 자동 탐색 위치(`.pi/extensions/`, `~/.pi/agent/extensions/`)에 두면 `/reload`로 핫리로드할 수 있다.
 
+### 환경변수
+
+| 변수 | 용도 |
+| --- | --- |
+| `PI_BOT_CONNECT_DEBUG` | `1`/`true`이면 어댑터 로그(console) 활성화 |
+| `PI_BOT_CONNECT_CONFIG` | 설정 파일 경로를 **강제**한다. 전역/프로젝트 탐색을 건너뛴다. 테스트·CI에서 개발자의 실제 설정에 의존하지 않기 위한 용도 |
+| `PI_TELEGRAM_TOKEN` (예정) | 전송 자격증명. **값은 설정 파일에 쓰지 않는다** |
+
+`src/index.test.ts`는 항상 `PI_BOT_CONNECT_CONFIG`로 임시 파일을 가리킨다. 테스트에서 `loadBridgeConfig`를 직접 쓰지 말고 이 방식을 따르라.
+
 ---
 
 ## 3. 파일 지도
@@ -122,6 +133,7 @@ PI_BOT_CONNECT_DEBUG=1 pi -e ./src/index.ts   # 어댑터 로그 활성화
 ```text
 src/
 ├── index.ts                 [껍데기] pi 어댑터. 커버리지 제외. 정책 금지
+├── index.test.ts            배선 테스트 22개 — 가짜 ExtensionAPI로 팩토리를 구동
 ├── bridge.ts                오케스트레이션. 전송↔코어↔세션 연결 + 송신 파이프라인
 ├── bridge.test.ts           26 테스트 — 전 구간 시나리오 (FakeTransport + FakeHost)
 ├── config.ts                설정 파일 검증 (신뢰할 수 없는 입력)
@@ -322,8 +334,8 @@ docs(agents): document the transport conformance checklist
 | 코어 (라우팅/페어링/리댁션/청킹/마크다운/다이제스트) | ✅ 완료, 테스트로 고정 |
 | 브리지 오케스트레이션 | ✅ 완료 |
 | 설정 검증 | ✅ 완료 |
-| pi 어댑터 셸 + 로컬 `/connect` 명령 | ✅ 완료 (타입체크만) |
-| 테스트 | 164 통과 / typecheck 0 에러 |
+| pi 어댑터 셸 + 로컬 `/connect` 명령 | ✅ 완료 (배선 테스트 22개) |
+| 테스트 | 186 통과 / typecheck 0 에러 |
 | Telegram 전송 | ❌ 미구현 (v1) |
 | Discord / Slack 전송 | ❌ 미구현 (v2/v3) |
 | 단일 인스턴스 락 | ❌ 미구현 (v1, G6) |
