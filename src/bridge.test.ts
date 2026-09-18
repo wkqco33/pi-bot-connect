@@ -1,30 +1,46 @@
 import { describe, expect, it } from "vitest";
 import { Bridge, MemoryBridgeStore, type BridgeHost } from "./bridge.js";
 import { createLogger, MemoryLogSink } from "./core/logger.js";
-import { ATTACHMENTS_UNSUPPORTED_NOTICE, PAUSED_NOTICE } from "./core/notices.js";
+import { ATTACHMENTS_UNSUPPORTED_NOTICE, ATTACHMENT_FETCH_FAILED_NOTICE, ATTACHMENT_TOO_LARGE_NOTICE, PAUSED_NOTICE } from "./core/notices.js";
 import {
 	noopLogger,
 	type BridgeConfig,
+	type FetchedAttachment,
+	type InboundAttachment,
+	type PromptImage,
+	type PromptOptions,
 	type SendReceipt,
 	type Transport,
 	type TransportCapabilities,
 } from "./core/types.js";
 import { FAKE_CAPABILITIES, FakeTransport } from "./transports/fake.js";
 
+/** A transport that can resolve one small png. */
+function attachmentResolver(data = "aGVsbG8="): (attachment: InboundAttachment) => Promise<FetchedAttachment> {
+	return (attachment) => Promise.resolve({ mediaType: attachment.mediaType, data });
+}
+
+const PNG = { kind: "image", mediaType: "image/png", ref: "file-1" } as const;
+
 class FakeHost implements BridgeHost {
 	readonly cwd = "/work/project";
 	sessionName: string | undefined = "test-session";
 	logger = noopLogger;
 	acceptsAttachments = false;
-	readonly prompts: Array<{ text: string; deliverAs?: "steer" | "followUp" }> = [];
+	readonly prompts: Array<{ text: string; deliverAs?: "steer" | "followUp"; images?: readonly PromptImage[] }> = [];
 	readonly notifications: string[] = [];
 	aborts = 0;
 	idle = true;
 	clock = 1_000;
 	rng: () => number = () => 0;
 
-	sendPrompt(text: string, options?: { deliverAs?: "steer" | "followUp" }): void {
-		this.prompts.push(options?.deliverAs === undefined ? { text } : { text, deliverAs: options.deliverAs });
+	sendPrompt(text: string, options?: PromptOptions): void {
+		const { deliverAs, images } = options ?? {};
+		this.prompts.push({
+			text,
+			...(deliverAs === undefined ? {} : { deliverAs }),
+			...(images === undefined ? {} : { images }),
+		});
 	}
 
 	abort(): void {
@@ -107,12 +123,18 @@ interface Harness {
 async function setup(
 	config: Partial<BridgeConfig> = {},
 	capabilities: Partial<TransportCapabilities> = {},
-	options: { pair?: boolean } = {},
+	options: {
+		pair?: boolean;
+		attachmentResolver?: (attachment: InboundAttachment) => Promise<FetchedAttachment>;
+	} = {},
 ): Promise<Harness> {
 	const host = new FakeHost();
 	const store = new MemoryBridgeStore();
 	const bridge = new Bridge({ host, config, store });
-	const transport = new FakeTransport({ capabilities });
+	const transport = new FakeTransport({
+		capabilities,
+		...(options.attachmentResolver === undefined ? {} : { attachmentResolver: options.attachmentResolver }),
+	});
 	await bridge.register(transport);
 	if (options.pair !== false) {
 		// Real flow: first contact issues a challenge, the operator reads the code
@@ -318,11 +340,50 @@ describe("Bridge — outbound shaping", () => {
 		expect(host.prompts).toEqual([]);
 	});
 
-	it("forwards an attachment when the host accepts them", async () => {
-		const { host, transport } = await setup();
+	it("forwards the image bytes only when both sides support it", async () => {
+		// Host can hand images to the model, but this transport has no fetchAttachment.
+		const withoutFetcher = await setup();
+		withoutFetcher.host.acceptsAttachments = true;
+		await withoutFetcher.transport.inject({ text: "what is this?", attachments: [PNG] });
+		expect(withoutFetcher.host.prompts).toEqual([]);
+		expect(withoutFetcher.transport.lastSent?.text).toBe(ATTACHMENTS_UNSUPPORTED_NOTICE);
+
+		const both = await setup({}, {}, { attachmentResolver: attachmentResolver("QUJD") });
+		both.host.acceptsAttachments = true;
+		await both.transport.inject({ text: "what is this?", attachments: [PNG] });
+		expect(both.host.prompts).toEqual([
+			{ text: "what is this?", images: [{ mediaType: "image/png", data: "QUJD" }] },
+		]);
+	});
+
+	it("substitutes a fallback prompt for an image-only message", async () => {
+		const { host, transport } = await setup({}, {}, { attachmentResolver: attachmentResolver() });
 		host.acceptsAttachments = true;
-		await transport.inject({ text: "", attachments: [{ kind: "image", mediaType: "image/png", ref: "f" }] });
-		expect(host.prompts).toEqual([{ text: "Describe the attached image." }]);
+		await transport.inject({ text: "", attachments: [PNG] });
+		expect(host.prompts[0]?.text).toBe("Describe the attached image.");
+	});
+
+	it("reports a failed download instead of forwarding the caption alone", async () => {
+		const { host, transport } = await setup({}, {}, {
+			attachmentResolver: () => Promise.reject(new Error("403 from the CDN")),
+		});
+		host.acceptsAttachments = true;
+		await transport.inject({ text: "what is this?", attachments: [PNG] });
+
+		expect(host.prompts).toEqual([]);
+		expect(transport.lastSent?.text).toBe(ATTACHMENT_FETCH_FAILED_NOTICE);
+	});
+
+	it("rejects an image that turns out too large after download", async () => {
+		// The 8 MiB cap is re-checked against the fetched bytes, not just the
+		// size the messenger declared.
+		const oversized = "A".repeat(Math.ceil((9 * 1024 * 1024 * 4) / 3));
+		const { host, transport } = await setup({}, {}, { attachmentResolver: attachmentResolver(oversized) });
+		host.acceptsAttachments = true;
+		await transport.inject({ text: "look", attachments: [PNG] });
+
+		expect(host.prompts).toEqual([]);
+		expect(transport.lastSent?.text).toBe(ATTACHMENT_TOO_LARGE_NOTICE);
 	});
 
 	it("uses the shared paused notice", async () => {
@@ -330,6 +391,103 @@ describe("Bridge — outbound shaping", () => {
 		await transport.inject({ text: "/pause" });
 		await transport.inject({ text: "do work" });
 		expect(transport.lastSent?.text).toBe(PAUSED_NOTICE);
+	});
+});
+
+describe("Bridge — progress card", () => {
+	it("posts one card and edits it afterwards", async () => {
+		const { bridge, transport, host } = await setup({}, { edit: true });
+		await transport.inject({ text: "start" });
+		transport.sent.length = 0;
+		transport.edits.length = 0;
+
+		bridge.beginTurn();
+		await bridge.publishProgress("▶ bash");
+		host.clock += 2_000;
+		await bridge.publishProgress("✓ bash");
+
+		expect(transport.sent.map((message) => message.text)).toEqual(["▶ bash"]);
+		expect(transport.edits.map((message) => message.text)).toEqual(["✓ bash"]);
+
+		// The handle stays the same across updates: that is the whole point.
+		const firstEditKey = transport.edits[0]?.editKey;
+		expect(firstEditKey).toMatch(/^fake-m\d+$/);
+		host.clock += 2_000;
+		await bridge.publishProgress("✓ read");
+		expect(transport.edits[1]?.editKey).toBe(firstEditKey);
+	});
+
+	it("posts a new message when the transport cannot edit", async () => {
+		const { bridge, transport, host } = await setup({}, { edit: false });
+		await transport.inject({ text: "start" });
+		transport.sent.length = 0;
+
+		bridge.beginTurn();
+		await bridge.publishProgress("▶ bash");
+		host.clock += 2_000;
+		await bridge.publishProgress("✓ bash");
+
+		expect(transport.sent.map((message) => message.text)).toEqual(["▶ bash", "✓ bash"]);
+	});
+
+	it("throttles updates within a turn", async () => {
+		const { bridge, transport, host } = await setup({ progressMinIntervalMs: 1_000 }, { edit: true });
+		await transport.inject({ text: "start" });
+		transport.sent.length = 0;
+
+		bridge.beginTurn();
+		expect(await bridge.publishProgress("▶ bash")).toBe(1);
+		expect(await bridge.publishProgress("▶ read")).toBe(0);
+		host.clock += 1_000;
+		expect(await bridge.publishProgress("✓ read")).toBe(1);
+	});
+
+	it("always publishes the first update of a turn", async () => {
+		const { bridge, host } = await setup({ progressMinIntervalMs: 60_000 }, { edit: true });
+		bridge.beginTurn();
+		host.clock += 10;
+		expect(await bridge.publishProgress("▶ bash")).toBe(1);
+	});
+
+	it("starts a new card on the next turn", async () => {
+		const { bridge, transport } = await setup({}, { edit: true });
+		await transport.inject({ text: "start" });
+		transport.sent.length = 0;
+		transport.edits.length = 0;
+
+		bridge.beginTurn();
+		await bridge.publishProgress("▶ bash");
+		bridge.beginTurn();
+		await bridge.publishProgress("▶ bash");
+
+		expect(transport.sent).toHaveLength(2);
+		expect(transport.edits).toHaveLength(0);
+	});
+
+	it("falls back to a new message when the edit is rejected", async () => {
+		const { bridge, transport, host } = await setup({}, { edit: true });
+		await transport.inject({ text: "start" });
+		transport.sent.length = 0;
+
+		bridge.beginTurn();
+		await bridge.publishProgress("▶ bash");
+		transport.failEdits = true;
+		host.clock += 2_000;
+		await bridge.publishProgress("✓ bash");
+
+		expect(transport.sent.map((message) => message.text)).toEqual(["▶ bash", "✓ bash"]);
+		expect(transport.edits).toHaveLength(0);
+	});
+
+	it("never posts a progress card to a paused conversation", async () => {
+		const { bridge, transport } = await setup({}, { edit: true });
+		await transport.inject({ text: "start" });
+		await transport.inject({ text: "/pause" });
+		transport.sent.length = 0;
+
+		bridge.beginTurn();
+		expect(await bridge.publishProgress("▶ bash")).toBe(0);
+		expect(transport.sent).toEqual([]);
 	});
 });
 

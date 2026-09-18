@@ -3,12 +3,23 @@
  *
  * Everything user-visible about "what should happen to this message" lives
  * here, so it can be tested without a network, a clock, or a messenger.
+ *
+ * Attachment policy belongs here too: deciding whether an attachment may be
+ * forwarded is a rule, not a transport detail, and a rejected attachment must
+ * never reach the model as a prompt about something that is not there.
  */
 
 import { parseRemoteCommand, remoteCommandNames } from "./commands.js";
 import { decidePairing, type PairingReason, type PendingChallenge } from "./pairing.js";
 import { startsWithAny, stripLeadingMention } from "./text.js";
-import type { BridgeConfig, Envelope } from "./types.js";
+import type { AttachmentPolicy, BridgeConfig, Envelope, InboundAttachment } from "./types.js";
+
+/** Things a messenger can send that the current configuration cannot accept. */
+export type UnsupportedFeature =
+	| "attachments"
+	| "attachment-not-image"
+	| "attachment-too-large"
+	| "attachment-too-many";
 
 export type RouterAction =
 	| { readonly type: "ignore"; readonly reason: "empty" | "unaddressed" }
@@ -16,10 +27,12 @@ export type RouterAction =
 	| { readonly type: "pair-required"; readonly pending: PendingChallenge; readonly reason: PairingReason }
 	| { readonly type: "unsupported"; readonly feature: UnsupportedFeature }
 	| { readonly type: "command"; readonly name: string; readonly args: string }
-	| { readonly type: "prompt"; readonly text: string; readonly deliverAs?: "steer" | "followUp" };
-
-/** Things a messenger can send that the current host cannot accept. */
-export type UnsupportedFeature = "attachments";
+	| {
+			readonly type: "prompt";
+			readonly text: string;
+			readonly deliverAs?: "steer" | "followUp";
+			readonly attachments?: readonly InboundAttachment[];
+	  };
 
 export interface RouterInput {
 	readonly envelope: Envelope;
@@ -27,8 +40,8 @@ export interface RouterInput {
 	readonly authenticated: boolean;
 	readonly pendingChallenge?: PendingChallenge;
 	readonly busy: boolean;
-	/** Whether the host can forward attachment bytes to the model. */
-	readonly acceptsAttachments: boolean;
+	/** Whether this transport can actually hand attachment bytes to the host. */
+	readonly attachmentPolicy: AttachmentPolicy;
 	readonly now: number;
 	readonly random: () => number;
 }
@@ -39,7 +52,7 @@ export interface IncomingText {
 	readonly addressed: boolean;
 }
 
-/** Used when a user sends only an attachment and the host can forward it. */
+/** Used when a user sends only a forwardable attachment. */
 export const ATTACHMENT_FALLBACK_PROMPT = "Describe the attached image.";
 
 /**
@@ -54,6 +67,23 @@ export function normalizeIncoming(envelope: Envelope, config: BridgeConfig): Inc
 		stripped.mentioned ||
 		startsWithAny(envelope.text.trim(), config.remotePrefixes);
 	return { text: stripped.text, addressed };
+}
+
+/** Returns the first policy violation, in the order the user can act on it. */
+export function findAttachmentProblem(
+	attachments: readonly InboundAttachment[],
+	policy: AttachmentPolicy,
+): UnsupportedFeature | null {
+	if (!policy.accepts) return "attachments";
+	if (attachments.length > policy.maxCount) return "attachment-too-many";
+	for (const attachment of attachments) {
+		if (!policy.allowedMediaTypes.includes(attachment.mediaType)) return "attachment-not-image";
+		// Size is checked again after download; the declared size is a cheap early out.
+		if (attachment.sizeBytes !== undefined && attachment.sizeBytes > policy.maxBytes) {
+			return "attachment-too-large";
+		}
+	}
+	return null;
 }
 
 function routePairing(input: RouterInput): RouterAction[] {
@@ -76,7 +106,7 @@ function routePairing(input: RouterInput): RouterAction[] {
 }
 
 function routeAuthenticated(input: RouterInput): RouterAction[] {
-	const { envelope, config, busy, acceptsAttachments } = input;
+	const { envelope, config, busy, attachmentPolicy } = input;
 	const incoming = normalizeIncoming(envelope, config);
 
 	const parsed = parseRemoteCommand(incoming.text, {
@@ -86,7 +116,8 @@ function routeAuthenticated(input: RouterInput): RouterAction[] {
 	});
 	if (parsed) return [{ type: "command", name: parsed.name, args: parsed.args }];
 
-	const hasAttachments = (envelope.attachments?.length ?? 0) > 0;
+	const attachments = envelope.attachments ?? [];
+	const hasAttachments = attachments.length > 0;
 
 	if (incoming.text.length === 0 && !hasAttachments) {
 		return [{ type: "ignore", reason: "empty" }];
@@ -95,17 +126,18 @@ function routeAuthenticated(input: RouterInput): RouterAction[] {
 		return [{ type: "ignore", reason: "unaddressed" }];
 	}
 
-	// Never fabricate a prompt about an attachment the host cannot forward: the
-	// model would be told to look at something that is not there.
-	if (hasAttachments && !acceptsAttachments) {
-		return [{ type: "unsupported", feature: "attachments" }];
+	if (hasAttachments) {
+		const problem = findAttachmentProblem(attachments, attachmentPolicy);
+		if (problem !== null) return [{ type: "unsupported", feature: problem }];
 	}
 
-	let text = incoming.text;
-	if (text.length === 0) text = ATTACHMENT_FALLBACK_PROMPT;
+	// Only reachable with attachments, because an empty text without them
+	// already returned "empty".
+	const text = incoming.text.length > 0 ? incoming.text : ATTACHMENT_FALLBACK_PROMPT;
+	const base = hasAttachments ? { type: "prompt" as const, text, attachments } : { type: "prompt" as const, text };
 
-	if (busy) return [{ type: "prompt", text, deliverAs: config.busyDelivery }];
-	return [{ type: "prompt", text }];
+	if (busy) return [{ ...base, deliverAs: config.busyDelivery }];
+	return [base];
 }
 
 export function route(input: RouterInput): RouterAction[] {

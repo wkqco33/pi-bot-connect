@@ -9,7 +9,7 @@
  * environment variable names (e.g. `tokenEnv`), never token values.
  */
 
-import type { BridgeConfig } from "./core/types.js";
+import { DEFAULT_CONFIG, type BridgeConfig } from "./core/types.js";
 
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 
@@ -32,6 +32,8 @@ const BRIDGE_KEYS = new Set([
 	"requirePairing",
 	"requireAddressing",
 	"digest",
+	"attachments",
+	"progressMinIntervalMs",
 ]);
 
 const TOP_LEVEL_KEYS = new Set(["bridge", "transports"]);
@@ -176,6 +178,45 @@ function parseBridgeSection(raw: unknown, ctx: Context): Partial<BridgeConfig> {
 			}
 			const maxLength = readIntegerInRange(ctx, raw.digest, "maxLength", `${path}.digest`, 100, 10_000);
 			if (maxLength !== undefined) config.digest = { maxLength };
+		}
+	}
+
+	const progressMinIntervalMs = readIntegerInRange(ctx, raw, "progressMinIntervalMs", path, 0, 60_000);
+	if (progressMinIntervalMs !== undefined) config.progressMinIntervalMs = progressMinIntervalMs;
+
+	if (raw.attachments !== undefined) {
+		const attachmentPath = `${path}.attachments`;
+		if (!isPlainObject(raw.attachments)) {
+			ctx.errors.push(`${attachmentPath}: expected an object`);
+		} else {
+			for (const key of Object.keys(raw.attachments)) {
+				if (!["allowedMediaTypes", "maxCount", "maxBytes"].includes(key)) {
+					ctx.warnings.push(`${attachmentPath}.${key}: unknown key, ignored`);
+				}
+			}
+
+			// Built from defaults because the policy is validated as a whole: a
+			// partially invalid section must not produce a half-applied policy.
+			const attachments = { ...DEFAULT_CONFIG.attachments };
+			let valid = true;
+
+			const mediaTypes = readStringArray(ctx, raw.attachments, "allowedMediaTypes", attachmentPath);
+			if (mediaTypes !== undefined) {
+				if (mediaTypes.length === 0 || mediaTypes.some((entry) => entry.trim().length === 0)) {
+					ctx.errors.push(`${attachmentPath}.allowedMediaTypes: entries must not be empty`);
+					valid = false;
+				} else {
+					attachments.allowedMediaTypes = mediaTypes;
+				}
+			}
+
+			const maxCount = readIntegerInRange(ctx, raw.attachments, "maxCount", attachmentPath, 1, 10);
+			if (maxCount !== undefined) attachments.maxCount = maxCount;
+
+			const maxBytes = readIntegerInRange(ctx, raw.attachments, "maxBytes", attachmentPath, 1024, 50 * 1024 * 1024);
+			if (maxBytes !== undefined) attachments.maxBytes = maxBytes;
+
+			if (valid) config.attachments = attachments;
 		}
 	}
 

@@ -35,6 +35,35 @@ export interface InboundAttachment {
 	sizeBytes?: number;
 }
 
+/** Attachment bytes resolved by a transport. `data` is base64 without a data: prefix. */
+export interface FetchedAttachment {
+	readonly mediaType: string;
+	readonly data: string;
+}
+
+/** An image handed to the agent as part of a prompt. */
+export interface PromptImage {
+	readonly mediaType: string;
+	/** base64 without a data: prefix. */
+	readonly data: string;
+}
+
+export interface PromptOptions {
+	readonly deliverAs?: "steer" | "followUp";
+	readonly images?: readonly PromptImage[];
+}
+
+/**
+ * What the bridge is allowed to forward. Checked in the pure router, so a
+ * rejected attachment never reaches the model as a phantom prompt.
+ */
+export interface AttachmentPolicy {
+	readonly accepts: boolean;
+	readonly allowedMediaTypes: readonly string[];
+	readonly maxCount: number;
+	readonly maxBytes: number;
+}
+
 /**
  * Normalized inbound message. Every transport must produce this shape and
  * nothing else — the bridge core never sees platform payloads.
@@ -102,6 +131,12 @@ export interface Transport {
 	stop(): Promise<void>;
 	send(message: OutboundMessage): Promise<SendReceipt>;
 	/**
+	 * Resolves an inbound attachment to bytes. Required for a transport whose
+	 * `capabilities.attachments` is true and that wants images forwarded.
+	 * MUST reject when the attachment exceeds the transport's own size cap.
+	 */
+	fetchAttachment?(attachment: InboundAttachment): Promise<FetchedAttachment>;
+	/**
 	 * Optional one-line health detail for `/connect doctor`.
 	 * MUST NOT contain credentials, tokens or message bodies.
 	 */
@@ -142,6 +177,14 @@ export interface BridgeConfig {
 	readonly digest: {
 		readonly maxLength: number;
 	};
+	readonly attachments: {
+		/** Media types the bridge will forward. Non-matching kinds are rejected. */
+		readonly allowedMediaTypes: readonly string[];
+		readonly maxCount: number;
+		readonly maxBytes: number;
+	};
+	/** Minimum gap between progress updates within a turn. */
+	readonly progressMinIntervalMs: number;
 }
 
 export const DEFAULT_CONFIG: BridgeConfig = {
@@ -155,6 +198,12 @@ export const DEFAULT_CONFIG: BridgeConfig = {
 	requirePairing: true,
 	requireAddressing: true,
 	digest: { maxLength: 1500 },
+	attachments: {
+		allowedMediaTypes: ["image/png", "image/jpeg", "image/gif", "image/webp"],
+		maxCount: 4,
+		maxBytes: 8 * 1024 * 1024,
+	},
+	progressMinIntervalMs: 1000,
 };
 
 export function resolveConfig(overrides: Partial<BridgeConfig> = {}): BridgeConfig {
@@ -162,6 +211,7 @@ export function resolveConfig(overrides: Partial<BridgeConfig> = {}): BridgeConf
 		...DEFAULT_CONFIG,
 		...overrides,
 		digest: { ...DEFAULT_CONFIG.digest, ...overrides.digest },
+		attachments: { ...DEFAULT_CONFIG.attachments, ...overrides.attachments },
 	};
 }
 
@@ -169,7 +219,6 @@ export function resolveConfig(overrides: Partial<BridgeConfig> = {}): BridgeConf
 export function identityKey(transport: TransportId, userId: string): string {
 	return `${transport}:${userId}`;
 }
-
 export function conversationKey(env: Envelope): string {
 	return `${env.transport}:${env.conversationId}`;
 }

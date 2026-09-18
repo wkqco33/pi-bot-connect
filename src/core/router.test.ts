@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { ATTACHMENT_FALLBACK_PROMPT, normalizeIncoming, route, type RouterInput } from "./router.js";
-import { resolveConfig } from "./types.js";
-import type { Envelope } from "./types.js";
+import {
+	ATTACHMENT_FALLBACK_PROMPT,
+	findAttachmentProblem,
+	normalizeIncoming,
+	route,
+	type RouterInput,
+} from "./router.js";
+import { resolveConfig, type AttachmentPolicy, type Envelope } from "./types.js";
 
 function envelope(overrides: Partial<Envelope> = {}): Envelope {
 	return {
@@ -20,8 +25,17 @@ const CONFIG = resolveConfig({
 	remotePrefixes: ["/", "connect ", "bot "],
 });
 
-type RouteState = Pick<RouterInput, "authenticated" | "busy" | "acceptsAttachments"> & {
+type RouteState = Pick<RouterInput, "authenticated" | "busy"> & {
 	pendingChallenge?: RouterInput["pendingChallenge"];
+	attachmentPolicy?: Partial<AttachmentPolicy>;
+};
+
+/** Real limits, but attachments are refused unless a test opts in. */
+const POLICY: AttachmentPolicy = {
+	accepts: false,
+	allowedMediaTypes: CONFIG.attachments.allowedMediaTypes,
+	maxCount: CONFIG.attachments.maxCount,
+	maxBytes: CONFIG.attachments.maxBytes,
 };
 
 function routeEnvelope(text: string, overrides: Partial<Envelope> = {}, state: Partial<RouteState> = {}) {
@@ -30,7 +44,7 @@ function routeEnvelope(text: string, overrides: Partial<Envelope> = {}, state: P
 		config: CONFIG,
 		authenticated: state.authenticated ?? true,
 		busy: state.busy ?? false,
-		acceptsAttachments: state.acceptsAttachments ?? false,
+		attachmentPolicy: { ...POLICY, ...state.attachmentPolicy },
 		...(state.pendingChallenge === undefined ? {} : { pendingChallenge: state.pendingChallenge }),
 		now: 1_000,
 		random: () => 0,
@@ -120,7 +134,7 @@ describe("route — commands and prompts", () => {
 			config: resolveConfig({ busyDelivery: "steer" }),
 			authenticated: true,
 			busy: true,
-			acceptsAttachments: false,
+			attachmentPolicy: POLICY,
 			now: 0,
 			random: () => 0,
 		});
@@ -151,7 +165,7 @@ describe("route — addressing policy", () => {
 			config: resolveConfig({ requireAddressing: false }),
 			authenticated: true,
 			busy: false,
-			acceptsAttachments: false,
+			attachmentPolicy: POLICY,
 			now: 0,
 			random: () => 0,
 		});
@@ -180,22 +194,78 @@ describe("route — attachments", () => {
 	});
 
 	it("substitutes a fallback prompt when forwarding is supported", () => {
-		const actions = routeEnvelope("", { attachments: [image] }, { acceptsAttachments: true });
-		expect(actions).toEqual([{ type: "prompt", text: ATTACHMENT_FALLBACK_PROMPT }]);
+		const actions = routeEnvelope("", { attachments: [image] }, { attachmentPolicy: { accepts: true } });
+		expect(actions).toEqual([{ type: "prompt", text: ATTACHMENT_FALLBACK_PROMPT, attachments: [image] }]);
 	});
 
 	it("keeps the caption when forwarding is supported", () => {
 		const actions = routeEnvelope(
 			"what does this error mean?",
 			{ attachments: [image] },
-			{ acceptsAttachments: true },
+			{ attachmentPolicy: { accepts: true } },
 		);
-		expect(actions).toEqual([{ type: "prompt", text: "what does this error mean?" }]);
+		expect(actions).toEqual([
+			{ type: "prompt", text: "what does this error mean?", attachments: [image] },
+		]);
+	});
+
+	it("rejects a file that the model could not read", () => {
+		const file = { kind: "file", mediaType: "application/pdf", ref: "f-1" } as const;
+		const actions = routeEnvelope("here", { attachments: [file] }, { attachmentPolicy: { accepts: true } });
+		expect(actions).toEqual([{ type: "unsupported", feature: "attachment-not-image" }]);
+	});
+
+	it("rejects more attachments than the policy allows", () => {
+		const many = Array.from({ length: 5 }, (_, index) => ({
+			kind: "image" as const,
+			mediaType: "image/png",
+			ref: `f-${index}`,
+		}));
+		const actions = routeEnvelope("look", { attachments: many }, { attachmentPolicy: { accepts: true } });
+		expect(actions).toEqual([{ type: "unsupported", feature: "attachment-too-many" }]);
+	});
+
+	it("rejects an image whose declared size is over the cap", () => {
+		const big = { kind: "image", mediaType: "image/png", ref: "f-1", sizeBytes: 9 * 1024 * 1024 } as const;
+		const actions = routeEnvelope("look", { attachments: [big] }, { attachmentPolicy: { accepts: true } });
+		expect(actions).toEqual([{ type: "unsupported", feature: "attachment-too-large" }]);
+	});
+
+	it("accepts an image at exactly the count and size limits", () => {
+		const atLimit = Array.from({ length: 4 }, (_, index) => ({
+			kind: "image" as const,
+			mediaType: "image/jpeg",
+			ref: `f-${index}`,
+			sizeBytes: 8 * 1024 * 1024,
+		}));
+		const actions = routeEnvelope("look", { attachments: atLimit }, { attachmentPolicy: { accepts: true } });
+		expect(actions[0]?.type).toBe("prompt");
 	});
 
 	it("still ignores an unaddressed channel attachment", () => {
 		expect(routeEnvelope("look", { attachments: [image], isDirect: false })).toEqual([
 			{ type: "ignore", reason: "unaddressed" },
 		]);
+	});
+});
+
+describe("findAttachmentProblem", () => {
+	const image = { kind: "image", mediaType: "image/png", ref: "f-1" } as const;
+
+	it("reports nothing for an acceptable attachment", () => {
+		expect(findAttachmentProblem([image], { ...POLICY, accepts: true })).toBeNull();
+	});
+
+	it("refuses everything when the policy does not accept attachments", () => {
+		expect(findAttachmentProblem([image], POLICY)).toBe("attachments");
+	});
+
+	it("checks the count before the media type", () => {
+		const many = Array.from({ length: 5 }, () => ({
+			kind: "file" as const,
+			mediaType: "application/pdf",
+			ref: "f",
+		}));
+		expect(findAttachmentProblem(many, { ...POLICY, accepts: true })).toBe("attachment-too-many");
 	});
 });

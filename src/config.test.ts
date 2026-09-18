@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseConfigFile } from "./config.js";
+import { DEFAULT_CONFIG } from "./core/types.js";
 
 describe("parseConfigFile — accepted input", () => {
 	it("parses a complete, valid file", () => {
@@ -134,5 +135,62 @@ describe("parseConfigFile — warnings", () => {
 	it("warns about unknown digest keys", () => {
 		const result = parseConfigFile({ bridge: { digest: { maxLength: 200, maxFiles: 3 } } });
 		expect(result.warnings).toEqual(["bridge.digest.maxFiles: unknown key, ignored"]);
+	});
+});
+
+describe("parseConfigFile — attachments", () => {
+	it("accepts a full attachment policy", () => {
+		const result = parseConfigFile({
+			bridge: { attachments: { allowedMediaTypes: ["image/png"], maxCount: 2, maxBytes: 2048 } },
+		});
+		expect(result.errors).toEqual([]);
+		expect(result.config.attachments).toEqual({
+			allowedMediaTypes: ["image/png"],
+			maxCount: 2,
+			maxBytes: 2048,
+		});
+	});
+
+	it("fills unset fields from the defaults so the policy is never half-applied", () => {
+		const result = parseConfigFile({ bridge: { attachments: { maxCount: 1 } } });
+		expect(result.config.attachments).toEqual({
+			allowedMediaTypes: DEFAULT_CONFIG.attachments.allowedMediaTypes,
+			maxCount: 1,
+			maxBytes: DEFAULT_CONFIG.attachments.maxBytes,
+		});
+	});
+
+	it("rejects a non-object attachments section", () => {
+		expect(parseConfigFile({ bridge: { attachments: 5 } }).errors).toContain(
+			"bridge.attachments: expected an object",
+		);
+	});
+
+	it("rejects a blank media type", () => {
+		expect(parseConfigFile({ bridge: { attachments: { allowedMediaTypes: ["  "] } } }).errors).toHaveLength(1);
+	});
+
+	it("rejects a count or size outside the allowed range", () => {
+		expect(parseConfigFile({ bridge: { attachments: { maxCount: 0 } } }).errors).toHaveLength(1);
+		expect(parseConfigFile({ bridge: { attachments: { maxCount: 11 } } }).errors).toHaveLength(1);
+		expect(parseConfigFile({ bridge: { attachments: { maxBytes: 10 } } }).errors).toHaveLength(1);
+	});
+
+	it("warns about unknown attachment keys", () => {
+		expect(parseConfigFile({ bridge: { attachments: { maxCount: 1, loki: true } } }).warnings).toEqual([
+			"bridge.attachments.loki: unknown key, ignored",
+		]);
+	});
+});
+
+describe("parseConfigFile — progress interval", () => {
+	it("accepts an interval in range, including zero", () => {
+		expect(parseConfigFile({ bridge: { progressMinIntervalMs: 0 } }).config.progressMinIntervalMs).toBe(0);
+		expect(parseConfigFile({ bridge: { progressMinIntervalMs: 2500 } }).config.progressMinIntervalMs).toBe(2500);
+	});
+
+	it("rejects an interval out of range", () => {
+		expect(parseConfigFile({ bridge: { progressMinIntervalMs: -1 } }).errors).toHaveLength(1);
+		expect(parseConfigFile({ bridge: { progressMinIntervalMs: 60_001 } }).errors).toHaveLength(1);
 	});
 });

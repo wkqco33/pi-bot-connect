@@ -13,6 +13,8 @@ import { acquireLock, describeHolder, type LockHandle } from "../../lock.js";
 import type {
 	Envelope,
 	EnvelopeHandler,
+	FetchedAttachment,
+	InboundAttachment,
 	Logger,
 	OutboundMessage,
 	SendReceipt,
@@ -22,6 +24,9 @@ import type {
 import { DiscordGateway, systemScheduler, type GatewayScheduler, type SocketFactory } from "./gateway.js";
 import { DISCORD_DEFAULT_INTENTS, DISCORD_TRANSPORT_ID, normalizeDiscordMessage } from "./normalize.js";
 import { DiscordRest, type DiscordApi } from "./rest.js";
+
+/** Discord's own CDN limit for a bot upload; used as the default download cap. */
+export const DEFAULT_MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 
 /** Discord's real limits, as of API v10. */
 export const DISCORD_CAPABILITIES: TransportCapabilities = {
@@ -45,6 +50,9 @@ export interface DiscordTransportOptions {
 	readonly createSocket?: SocketFactory;
 	readonly scheduler?: GatewayScheduler;
 	readonly lockStaleMs?: number;
+	/** Cap for a downloaded attachment. Discord's own CDN limit is 25 MB. */
+	readonly maxAttachmentBytes?: number;
+	readonly fetchImpl?: typeof fetch;
 }
 
 export class DiscordTransport implements Transport {
@@ -54,6 +62,8 @@ export class DiscordTransport implements Transport {
 	private readonly options: DiscordTransportOptions;
 	private readonly rest: DiscordApi;
 	private readonly scheduler: GatewayScheduler;
+	private readonly fetchImpl: typeof fetch;
+	private readonly maxAttachmentBytes: number;
 
 	private handler: EnvelopeHandler | null = null;
 	private gateway: DiscordGateway | null = null;
@@ -69,6 +79,8 @@ export class DiscordTransport implements Transport {
 		this.options = options;
 		this.rest = options.rest ?? new DiscordRest({ token: options.token });
 		this.scheduler = options.scheduler ?? systemScheduler;
+		this.fetchImpl = options.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
+		this.maxAttachmentBytes = options.maxAttachmentBytes ?? DEFAULT_MAX_ATTACHMENT_BYTES;
 	}
 
 	async start(handler: EnvelopeHandler): Promise<void> {
@@ -138,6 +150,38 @@ export class DiscordTransport implements Transport {
 
 		const created = await this.rest.createMessage(message.conversationId, message.text);
 		return { messageId: created.id, editKey: created.id };
+	}
+
+	/**
+	 * Downloads an attachment from the Discord CDN.
+	 *
+	 * Discord CDN URLs are signed and need no Authorization header, so this does
+	 * not send the bot token to a second host.
+	 */
+	async fetchAttachment(attachment: InboundAttachment): Promise<FetchedAttachment> {
+		let response: Response;
+		try {
+			response = await this.fetchImpl(attachment.ref);
+		} catch (error) {
+			throw new Error(`could not reach the attachment host: ${String(error)}`);
+		}
+
+		if (!response.ok) {
+			throw new Error(`attachment download failed with status ${response.status}`);
+		}
+
+		// Trust the declared size only as an early out; the real check is after read.
+		const declared = Number(response.headers.get("content-length") ?? Number.NaN);
+		if (Number.isFinite(declared) && declared > this.maxAttachmentBytes) {
+			throw new Error(`attachment is ${declared} bytes, over the ${this.maxAttachmentBytes} byte limit`);
+		}
+
+		const buffer = Buffer.from(await response.arrayBuffer());
+		if (buffer.byteLength > this.maxAttachmentBytes) {
+			throw new Error(`attachment is ${buffer.byteLength} bytes, over the ${this.maxAttachmentBytes} byte limit`);
+		}
+
+		return { mediaType: attachment.mediaType, data: buffer.toString("base64") };
 	}
 
 	/** Health detail for `/connect doctor`. Never contains the token. */

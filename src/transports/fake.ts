@@ -8,6 +8,8 @@
 import type {
 	Envelope,
 	EnvelopeHandler,
+	FetchedAttachment,
+	InboundAttachment,
 	OutboundMessage,
 	SendReceipt,
 	Transport,
@@ -28,6 +30,12 @@ export const FAKE_CAPABILITIES: TransportCapabilities = {
 export interface FakeTransportOptions {
 	readonly id?: string;
 	readonly capabilities?: Partial<TransportCapabilities>;
+	/**
+	 * When given, this transport can resolve attachment bytes. Left undefined the
+	 * transport has no `fetchAttachment`, which is how the bridge detects a
+	 * transport that cannot carry attachments at all.
+	 */
+	readonly attachmentResolver?: (attachment: InboundAttachment) => Promise<FetchedAttachment>;
 }
 
 export class FakeTransport implements Transport {
@@ -38,6 +46,10 @@ export class FakeTransport implements Transport {
 	/** Messages that updated an existing message. */
 	readonly edits: OutboundMessage[] = [];
 	started = false;
+	/** Simulates an edit the platform rejects: deleted message, rate limit, ... */
+	failEdits = false;
+	/** Only defined when `attachmentResolver` was provided. */
+	readonly fetchAttachment?: (attachment: InboundAttachment) => Promise<FetchedAttachment>;
 
 	private handler: EnvelopeHandler | null = null;
 	private counter = 0;
@@ -45,6 +57,10 @@ export class FakeTransport implements Transport {
 	constructor(options: FakeTransportOptions = {}) {
 		this.id = options.id ?? "fake";
 		this.capabilities = { ...FAKE_CAPABILITIES, ...options.capabilities };
+		const resolver = options.attachmentResolver;
+		if (resolver !== undefined) {
+			this.fetchAttachment = (attachment) => resolver(attachment);
+		}
 	}
 
 	async start(handler: EnvelopeHandler): Promise<void> {
@@ -58,6 +74,9 @@ export class FakeTransport implements Transport {
 	}
 
 	async send(message: OutboundMessage): Promise<SendReceipt> {
+		if (message.editKey !== undefined && this.failEdits) {
+			throw new Error(`${this.id} rejected the edit`);
+		}
 		if (message.editKey !== undefined) {
 			this.edits.push(message);
 		} else {

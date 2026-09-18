@@ -295,3 +295,51 @@ describe("DiscordTransport — diagnostics", () => {
 		expect(transport.diagnose()).toContain("not started");
 	});
 });
+
+describe("DiscordTransport — attachment download", () => {
+	const PNG_ATTACHMENT = { kind: "image", mediaType: "image/png", ref: "https://cdn.example/a1" } as const;
+	const bytes = new Uint8Array([1, 2, 3, 4]);
+
+	function imageResponse(
+		body: Uint8Array,
+		init: { status?: number; contentLength?: number | null } = {},
+	): Response {
+		const headers: Record<string, string> = { "content-type": "image/png" };
+		if (init.contentLength !== undefined && init.contentLength !== null) {
+			headers["content-length"] = String(init.contentLength);
+		}
+		return new Response(body, { status: init.status ?? 200, headers });
+	}
+
+	it("downloads an attachment and returns base64", async () => {
+		const h = setup({ fetchImpl: () => Promise.resolve(imageResponse(bytes)) });
+		const fetched = await h.transport.fetchAttachment(PNG_ATTACHMENT);
+		expect(fetched).toEqual({ mediaType: "image/png", data: Buffer.from(bytes).toString("base64") });
+	});
+
+	it("rejects a non-ok response", async () => {
+		const h = setup({ fetchImpl: () => Promise.resolve(imageResponse(bytes, { status: 403 })) });
+		await expect(h.transport.fetchAttachment(PNG_ATTACHMENT)).rejects.toThrow(/status 403/);
+	});
+
+	it("rejects an attachment whose declared size is over the cap", async () => {
+		const h = setup({
+			maxAttachmentBytes: 10,
+			fetchImpl: () => Promise.resolve(imageResponse(bytes, { contentLength: 500 })),
+		});
+		await expect(h.transport.fetchAttachment(PNG_ATTACHMENT)).rejects.toThrow(/over the 10 byte limit/);
+	});
+
+	it("rejects an attachment that only turns out too large after download", async () => {
+		const h = setup({
+			maxAttachmentBytes: 10,
+			fetchImpl: () => Promise.resolve(imageResponse(new Uint8Array(20))),
+		});
+		await expect(h.transport.fetchAttachment(PNG_ATTACHMENT)).rejects.toThrow(/over the 10 byte limit/);
+	});
+
+	it("rejects when the attachment host cannot be reached", async () => {
+		const h = setup({ fetchImpl: () => Promise.reject(new Error("ENOTFOUND")) });
+		await expect(h.transport.fetchAttachment(PNG_ATTACHMENT)).rejects.toThrow(/could not reach/);
+	});
+});

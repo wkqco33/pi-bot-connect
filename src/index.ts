@@ -21,7 +21,7 @@ import { formatDuration } from "./core/commands.js";
 import { buildWorkDigest } from "./core/digest.js";
 import { extractAssistantText, summarize } from "./core/message.js";
 import { formatChallengeCode } from "./core/pairing.js";
-import { resolveConfig, type BridgeConfig, type Logger } from "./core/types.js";
+import { resolveConfig, type BridgeConfig, type Logger, type PromptImage } from "./core/types.js";
 import { FileBridgeStore } from "./file-store.js";
 import { createTransports, listTransportFactories } from "./transports/index.js";
 
@@ -156,6 +156,25 @@ function sessionKey(ctx: ExtensionContext): string {
 	return "ephemeral";
 }
 
+/**
+ * Builds the content pi expects. A text-only prompt stays a plain string so that
+ * skill and template expansion keep working for remote commands.
+ *
+ * NOTE: pi's `ImageContent` is flat (`{ type, data, mimeType }`). The nested
+ * `source: { type: "base64", mediaType, data }` shape in `docs/extensions.md`
+ * is stale; the compiler is authoritative here.
+ */
+function buildPromptContent(
+	text: string,
+	images: readonly PromptImage[] | undefined,
+): string | Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> {
+	if (images === undefined || images.length === 0) return text;
+	return [
+		{ type: "text", text },
+		...images.map((image) => ({ type: "image" as const, data: image.data, mimeType: image.mediaType })),
+	];
+}
+
 // ---------------------------------------------------------------------------
 // Extension
 // ---------------------------------------------------------------------------
@@ -171,21 +190,21 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 	let runningTool: string | undefined;
 	let lastAssistantText = "";
 	let lastUserPrompt = "";
-	let progressSent = false;
 
 	const host: BridgeHost = {
 		sendPrompt(text, options) {
+			const content = buildPromptContent(text, options?.images);
 			try {
 				if (options?.deliverAs) {
-					pi.sendUserMessage(text, { deliverAs: options.deliverAs });
+					pi.sendUserMessage(content, { deliverAs: options.deliverAs });
 					return;
 				}
 				// Race guard: the agent may have become busy since routing.
 				if (sessionCtx && !sessionCtx.isIdle()) {
-					pi.sendUserMessage(text, { deliverAs: "followUp" });
+					pi.sendUserMessage(content, { deliverAs: "followUp" });
 					return;
 				}
-				pi.sendUserMessage(text);
+				pi.sendUserMessage(content);
 			} catch (error) {
 				logger.error("failed to inject remote prompt", { error: String(error) });
 				sessionCtx?.ui.notify(`[${COMMAND_KEY}] failed to inject prompt: ${String(error)}`, "error");
@@ -200,9 +219,9 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 		notify(text, level) {
 			sessionCtx?.ui.notify(`[${COMMAND_KEY}] ${text}`, level ?? "info");
 		},
-		// The host cannot hand attachment bytes to the model yet, so the router
-		// rejects them instead of inventing a prompt about a missing image.
-		acceptsAttachments: false,
+		// The host can hand base64 image content to the model. Whether a specific
+		// transport can produce the bytes is decided per message by the bridge.
+		acceptsAttachments: true,
 		get cwd() {
 			return sessionCtx?.cwd ?? process.cwd();
 		},
@@ -417,7 +436,6 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 		runningTool = undefined;
 		lastAssistantText = "";
 		lastUserPrompt = "";
-		progressSent = false;
 	});
 
 	// --- session tracking for digest + progress -------------------------------
@@ -429,23 +447,23 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 
 	pi.on("agent_start", async (_event, ctx) => {
 		sessionCtx = ctx;
-		progressSent = false;
 		lastAssistantText = "";
+		// A new turn gets a new progress card instead of editing the last one.
+		bridge?.beginTurn();
 	});
 
 	pi.on("tool_execution_start", async (event, ctx) => {
 		sessionCtx = ctx;
 		runningTool = event.toolName;
-		// One coalesced progress ping per turn. Tool arguments are never sent:
-		// they routinely contain paths, tokens and file contents.
-		if (!bridge || progressSent) return;
-		progressSent = true;
-		await bridge.publish("progress", `▶ ${event.toolName}`);
+		// Only the tool *name* is ever sent: arguments routinely carry paths, tokens
+		// and file contents. The bridge throttles and edits one card per turn.
+		await bridge?.publishProgress(`▶ ${event.toolName}`);
 	});
 
-	pi.on("tool_execution_end", async (_event, ctx) => {
+	pi.on("tool_execution_end", async (event, ctx) => {
 		sessionCtx = ctx;
 		runningTool = undefined;
+		await bridge?.publishProgress(`${event.isError === true ? "✕" : "✓"} ${event.toolName}`);
 	});
 
 	pi.on("message_end", async (event, ctx) => {

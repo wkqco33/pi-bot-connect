@@ -9,7 +9,15 @@
 import { executeRemoteCommand, type RemoteCommandContext } from "./core/commands.js";
 import { chunkForTransport } from "./core/chunk.js";
 import { renderMarkdown } from "./core/markdown.js";
-import { ATTACHMENTS_UNSUPPORTED_NOTICE, PAUSED_NOTICE, unknownCommandNotice } from "./core/notices.js";
+import {
+	ATTACHMENTS_UNSUPPORTED_NOTICE,
+	ATTACHMENT_FETCH_FAILED_NOTICE,
+	ATTACHMENT_NOT_AN_IMAGE_NOTICE,
+	ATTACHMENT_TOO_LARGE_NOTICE,
+	ATTACHMENT_TOO_MANY_NOTICE,
+	PAUSED_NOTICE,
+	unknownCommandNotice,
+} from "./core/notices.js";
 import { isFreshChallenge, pairingCodeNotice, pairingPrompt, pairingSuccessPrompt, type PendingChallenge } from "./core/pairing.js";
 import { redactSecrets } from "./core/redact.js";
 import { route, type UnsupportedFeature } from "./core/router.js";
@@ -17,10 +25,15 @@ import {
 	conversationKey,
 	identityKey,
 	resolveConfig,
+	type AttachmentPolicy,
 	type BridgeConfig,
 	type Envelope,
+	type FetchedAttachment,
 	type Logger,
 	type OutboundKind,
+	type PromptImage,
+	type PromptOptions,
+	type SendReceipt,
 	type Transport,
 	type TransportDiagnostics,
 	type TransportId,
@@ -35,6 +48,8 @@ export interface ConversationTarget {
 export interface SendRequest extends ConversationTarget {
 	readonly kind: OutboundKind;
 	readonly text: string;
+	/** Update an existing message instead of posting a new one. */
+	readonly editKey?: string;
 }
 
 export interface BridgeSnapshot {
@@ -122,7 +137,7 @@ export class MemoryBridgeStore implements BridgeStore {
 
 /** Everything the bridge needs from the pi session, without importing pi. */
 export interface BridgeHost {
-	sendPrompt(text: string, options?: { deliverAs?: "steer" | "followUp" }): void;
+	sendPrompt(text: string, options?: PromptOptions): void;
 	abort(): void;
 	isIdle(): boolean;
 	notify(text: string, level?: "info" | "warning" | "error"): void;
@@ -138,6 +153,9 @@ export interface BridgeHost {
 /** Renders a router `unsupported` action for the user. */
 const UNSUPPORTED_NOTICES: Record<UnsupportedFeature, string> = {
 	attachments: ATTACHMENTS_UNSUPPORTED_NOTICE,
+	"attachment-not-image": ATTACHMENT_NOT_AN_IMAGE_NOTICE,
+	"attachment-too-large": ATTACHMENT_TOO_LARGE_NOTICE,
+	"attachment-too-many": ATTACHMENT_TOO_MANY_NOTICE,
 };
 
 export interface BridgeOptions {
@@ -153,6 +171,9 @@ export class Bridge {
 	private readonly host: BridgeHost;
 	private readonly transports = new Map<TransportId, Transport>();
 	private readonly startErrors = new Map<TransportId, string>();
+	/** Conversation key to the message id of the current turn's progress card. */
+	private readonly progressKeys = new Map<string, string>();
+	private lastProgressAt = Number.NEGATIVE_INFINITY;
 
 	constructor(options: BridgeOptions) {
 		this.host = options.host;
@@ -227,7 +248,7 @@ export class Bridge {
 			authenticated,
 			pendingChallenge: this.store.getPending(key),
 			busy: !this.host.isIdle(),
-			acceptsAttachments: this.host.acceptsAttachments,
+			attachmentPolicy: this.attachmentPolicy(envelope.transport),
 			now: this.host.now(),
 			random: () => this.host.random(),
 		});
@@ -235,6 +256,21 @@ export class Bridge {
 		for (const action of actions) {
 			await this.applyAction(action, envelope, identity, key);
 		}
+	}
+
+	/**
+	 * Attachment acceptance is a *pair* of capabilities: the host must be able to
+	 * give the model image content, and this transport must be able to produce the
+	 * bytes. Either one missing means the message is refused, not guessed at.
+	 */
+	private attachmentPolicy(transportId: TransportId): AttachmentPolicy {
+		const transport = this.transports.get(transportId);
+		return {
+			accepts: this.host.acceptsAttachments && transport?.fetchAttachment !== undefined,
+			allowedMediaTypes: this.config.attachments.allowedMediaTypes,
+			maxCount: this.config.attachments.maxCount,
+			maxBytes: this.config.attachments.maxBytes,
+		};
 	}
 
 	private isAuthenticated(identity: string): boolean {
@@ -297,11 +333,55 @@ export class Bridge {
 			return;
 		}
 
-		const options = action.deliverAs === undefined ? undefined : { deliverAs: action.deliverAs };
-		this.host.sendPrompt(action.text, options);
+		await this.forwardPrompt(action, envelope);
+	}
+
+	/** Downloads any attachments, then hands the prompt to the session. */
+	private async forwardPrompt(
+		action: Extract<ReturnType<typeof route>[number], { type: "prompt" }>,
+		envelope: Envelope,
+	): Promise<void> {
+		const attachments = action.attachments ?? [];
+		let images: PromptImage[] | undefined;
+
+		if (attachments.length > 0) {
+			const transport = this.transports.get(envelope.transport);
+			const fetchAttachment = transport?.fetchAttachment?.bind(transport);
+			if (fetchAttachment === undefined) {
+				await this.reply(envelope, UNSUPPORTED_NOTICES.attachments);
+				return;
+			}
+
+			const fetched: PromptImage[] = [];
+			for (const attachment of attachments) {
+				let result: FetchedAttachment;
+				try {
+					result = await fetchAttachment(attachment);
+				} catch (error) {
+					this.host.logger.warn("attachment download failed", { error: String(error) });
+					await this.reply(envelope, ATTACHMENT_FETCH_FAILED_NOTICE);
+					return;
+				}
+				// Base64 is 4/3 of the byte length. Re-checked here because the size the
+				// messenger declared is a hint, not a guarantee.
+				if (Math.ceil((result.data.length * 3) / 4) > this.config.attachments.maxBytes) {
+					await this.reply(envelope, ATTACHMENT_TOO_LARGE_NOTICE);
+					return;
+				}
+				fetched.push({ mediaType: result.mediaType, data: result.data });
+			}
+			if (fetched.length > 0) images = fetched;
+		}
+
+		const options: PromptOptions = {
+			...(action.deliverAs === undefined ? {} : { deliverAs: action.deliverAs }),
+			...(images === undefined ? {} : { images }),
+		};
+		this.host.sendPrompt(action.text, Object.keys(options).length > 0 ? options : undefined);
 		this.host.logger.info("prompt forwarded", {
 			transport: envelope.transport,
 			deliverAs: action.deliverAs ?? "immediate",
+			images: images?.length ?? 0,
 		});
 	}
 
@@ -364,23 +444,82 @@ export class Bridge {
 	}
 
 	/** Sends text to one conversation, rendering and chunking for that transport. */
-	async send(request: SendRequest): Promise<void> {
+	async send(request: SendRequest): Promise<SendReceipt | null> {
 		const transport = this.transports.get(request.transport);
 		if (!transport) {
 			this.host.logger.warn("cannot send: transport not registered", { transport: request.transport });
-			return;
+			return null;
 		}
 
 		const rendered = renderMarkdown(redactSecrets(request.text), transport.capabilities.markdown);
 		const chunks = chunkForTransport(rendered, transport.capabilities);
-		for (const chunk of chunks) {
-			await transport.send({
+		let first: SendReceipt | null = null;
+
+		for (const [index, chunk] of chunks.entries()) {
+			const receipt = await transport.send({
 				conversationId: request.conversationId,
 				kind: request.kind,
 				text: chunk,
+				// Only the first chunk carries the edit handle; editing a continuation
+				// would leave the earlier chunks stale.
+				...(index === 0 && request.editKey !== undefined ? { editKey: request.editKey } : {}),
 				...(request.threadId === undefined ? {} : { threadId: request.threadId }),
 			});
+			if (first === null) first = receipt;
 		}
+
+		return first;
+	}
+
+	/**
+	 * Starts a new turn. The next progress update posts a fresh message instead of
+	 * editing the previous turn's card, and the throttle is reset so the first
+	 * update of a turn always lands.
+	 */
+	beginTurn(): void {
+		this.progressKeys.clear();
+		this.lastProgressAt = Number.NEGATIVE_INFINITY;
+	}
+
+	/**
+	 * Publishes a coalesced progress update, throttled and edited in place on
+	 * transports that support editing. Without this a long turn would post one
+	 * chat message per tool call.
+	 */
+	async publishProgress(text: string): Promise<number> {
+		const now = this.host.now();
+		if (now - this.lastProgressAt < this.config.progressMinIntervalMs) return 0;
+		this.lastProgressAt = now;
+
+		let delivered = 0;
+		for (const target of this.store.listConversations()) {
+			const key = `${target.transport}:${target.conversationId}`;
+			if (this.store.isPaused(key)) continue;
+			const transport = this.transports.get(target.transport);
+			if (!transport) continue;
+			await this.sendProgress(target, transport, text);
+			delivered++;
+		}
+		return delivered;
+	}
+
+	private async sendProgress(target: ConversationTarget, transport: Transport, text: string): Promise<void> {
+		const key = `${target.transport}:${target.conversationId}`;
+		const editKey = this.progressKeys.get(key);
+
+		if (editKey !== undefined && transport.capabilities.edit) {
+			try {
+				await this.send({ ...target, kind: "progress", text, editKey });
+				return;
+			} catch (error) {
+				// The message may have been deleted, or the edit may be rate limited.
+				this.host.logger.debug("progress edit failed, posting a new message", { error: String(error) });
+				this.progressKeys.delete(key);
+			}
+		}
+
+		const receipt = await this.send({ ...target, kind: "progress", text });
+		if (receipt?.editKey !== undefined) this.progressKeys.set(key, receipt.editKey);
 	}
 
 	/** Sends a progress update to every remembered, non-paused conversation. */
