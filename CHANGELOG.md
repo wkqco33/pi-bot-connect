@@ -9,6 +9,18 @@
 
 ## [Unreleased]
 
+### Changed
+
+- 긴 응답을 크기(2000자)로만 자르던 것을 마크다운 구조 기준으로 바꿨다. 헤딩 경계에서 먼저 자르고, 헤딩이 그 본문에서 떨어져 나가는 일이 없어진다. 코드 펜스는 펜스 자체가 한도를 넘지 않는 한 분할되지 않는다
+- Discord 길이를 실제 단위(UTF-16 code unit)로 센다. 이모지 하나가 2단위를 쓰므로 더 이상 2000을 넘길 수 없다 (`TransportCapabilities.lengthUnit`에 `utf16` 추가)
+- CRLF로 끝나는 줄이 `\r`과 `\n` 사이에서 잘리지 않는다
+- 섹션 경계를 지키는 대가로 메시지 수가 최대 2배까지 늘 수 있다. `maxChunks`(기본 8)와 `[truncated: …]` 안내는 그대로다
+
+### Added
+
+- `src/core/markdown-blocks.ts` — 펜스 인식 CommonMark 블록 파서와 섹션 패킹. `chunkText`는 전송 한도 보증 안전망으로 남는다(`measureLength` 추가)
+- 한도보다 긴 코드 블록은 조각마다 여는/닫는 펜스를 다시 붙여 각 메시지가 유효한 코드 블록이 된다. 이 경우에만 `join(chunks) === source`가 성립하지 않는다(코드 내용은 그대로)
+
 ### Planned
 
 - Telegram 전송 (롱폴링, 4096 bytes, HTML). 코어는 이미 전송 무관이므로 어댑터만 추가하면 된다

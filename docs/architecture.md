@@ -10,12 +10,13 @@
                                         │
 ┌──────────────── src/bridge.ts (오케스트레이션, 순수 + 주입된 I/O) ───────────────────┐
 │  onEnvelope ──► route() ──► applyAction() ──► send()/publish()                        │
-│                 (core/router)   (commands, pairing)  (redact→markdown→chunk)          │
+│                 (core/router)   (commands, pairing)  (redact→blocks→render→chunk)     │
 └───────────────────────────────────────────────────────────────────────────────────────┘
                                         │
-┌──────────────── src/core/* (완전 순수: pi도 네트워크도 모른다) ──────────────────────┐
-│  types · router · commands · pairing · chunk · markdown · redact · digest · message    │
-└───────────────────────────────────────────────────────────────────────────────────────┘
+┌────────────────────── src/core/* (완전 순수: pi도 네트워크도 모른다) ───────────────────────┐
+│  types · router · commands · pairing · chunk · markdown-blocks                 │
+│  markdown · redact · digest · message · work · text · notices · logger         │
+└────────────────────────────────────────────────────────────────────────────────┘
                                         │
 ┌──────────────── src/transports/* (유일한 I/O 경계) ─────────────────────────────────┐
 │  discord (구현) · fake (테스트) · telegram(TODO) · slack(TODO)                          │
@@ -47,6 +48,7 @@ interface Transport {
 - 본문 리댁션 (`redactSecrets`)
 - 마크다운 변환 (전송의 `capabilities.markdown`에 맞춰)
 - 길이 제한 청킹 (`capabilities.maxMessageLength`, `lengthUnit`)
+  구조 인식 분할(`chunkMarkdown`)이 CommonMark 헤딩/펜스 경계를 먼저 찾고, 한도를 넘는 단일 블록만 크기 기준(`chunkText`)으로 다시 나뉜다
 - 인증/페어링 판정
 - 명령 파싱/실행
 - 일시정지 상태 존중
@@ -70,9 +72,11 @@ interface Transport {
 | 전송 | maxMessageLength | lengthUnit | markdown | threads | edit |
 | --- | --- | --- | --- | --- | --- |
 | fake | 4000 | chars | markdown | false | false |
-| discord | 2000 | chars | markdown | false | true |
+| discord | 2000 | utf16 | markdown | false | true |
 | telegram | 4096 | bytes | html | false | true |
 | slack | 4000 | chars | mrkdwn | true | true |
+
+`lengthUnit`은 플랫폼이 길이를 세는 방식이다: `chars`는 code point, `utf16`은 UTF-16 code unit, `bytes`는 UTF-8 바이트. **Discord는 code unit을 세므로 이모지 하나가 2000자 중 2를 먹는다** — `chars`로 선언하면 이모지가 많은 답변이 플랫폼 한도를 넘긴다.
 
 Discord는 스레드에서 `channel_id`가 스레드 자체의 id이므로 `conversationId`가 자동으로 분리된다. 별도 `threadId` 추적이 필요 없어 `threads: false`로 두었다(부모 채널과의 관계를 다루지 않는다는 뜻). `attachments: true`는 전송이 첨부를 **운반할 수 있다**는 뜻이며, 호스트가 그것을 모델에 전달할 수 있는지와는 별개다.
 
@@ -88,7 +92,7 @@ Discord는 스레드에서 `channel_id`가 스레드 자체의 id이므로 `conv
 | I2 | 프롬프트 본문은 로그에 남지 않는다. | `bridge.test.ts` |
 | I3 | 모든 송신 본문은 리댁션을 거친다. | `redact.test.ts`, `bridge.test.ts` |
 | I4 | 청킹은 UTF-8 경계(서로게이트 쌍)를 깨지 않는다. | `chunk.test.ts` |
-| I5 | 청크를 합치면 원문과 정확히 일치한다(손실·중복 없음). | `chunk.test.ts` |
+| I5 | 청크를 합치면 원문과 정확히 일치한다(손실·중복 없음). 한도보다 긴 펜스를 복구할 때만 펜스 마커가 반복된다 — 그 경우에도 코드 내용은 손실·중복·재배열되지 않는다. | `chunk.test.ts`, `markdown-blocks.test.ts` |
 | I6 | 인증되지 않은 사용자의 메시지는 절대 프롬프트로 승격되지 않는다. | `router.test.ts`, `bridge.test.ts` |
 | I7 | 미인증 상태에서 채널 잡담은 무시된다(무응답). | `router.test.ts`, `bridge.test.ts` |
 | I8 | 명령은 에이전트가 바쁠 때도 처리된다. 프롬프트만 대기열로 간다. | `router.test.ts`, `bridge.test.ts` |
@@ -109,6 +113,10 @@ Discord는 스레드에서 `channel_id`가 스레드 자체의 id이므로 `conv
 | I23 | 툴 이벤트가 없는 추론 구간에도 "thinking…" 카드가 표시된다. | `progress.test.ts`, `bridge.test.ts` |
 | I24 | `typing()` 실패는 턴을 실패시키지 않는다. 없거나 거부되면 그냥 진행한다. | `bridge.test.ts`, `discord/index.test.ts` |
 | I25 | 첨부의 media type은 선언값이 아니라 실제로 받은 바이트의 content type으로 재검사한다. | `bridge.test.ts`, `discord/index.test.ts` |
+| I26 | 메시지 경계는 섹션 경계에 맞춘다. 헤딩은 그 본문과 분리되지 않는다(헤딩만 남은 메시지를 만들지 않는다). | `markdown-blocks.test.ts`, `bridge.test.ts` |
+| I27 | 펜스 자체가 한도를 넘지 않는 한 코드 펜스는 분할되지 않는다. | `markdown-blocks.test.ts` |
+| I28 | 한도를 넘는 펜스는 조각마다 여는/닫는 펜스를 다시 붙여 각 메시지가 그 자체로 유효한 코드 블록이 되게 한다. | `markdown-blocks.test.ts` |
+| I29 | 줄바꿈은 `\r`과 `\n` 사이에서 잘리지 않는다(CRLF가 두 메시지로 갈라지지 않는다). | `chunk.test.ts` |
 
 ---
 
@@ -118,8 +126,8 @@ Discord는 스레드에서 `channel_id`가 스레드 자체의 id이므로 `conv
 
 | 계층 | 방식 | 현재 |
 | --- | --- | --- |
-| `core/*` | 순수 함수 단위 테스트. 결정적 rng/clock 주입 | 182 테스트 |
-| `bridge.ts` | `FakeTransport` + `FakeHost`로 전 구간 시나리오 | 54 테스트 |
+| `core/*` | 순수 함수 단위 테스트. 결정적 rng/clock 주입 | 238 테스트 |
+| `bridge.ts` | `FakeTransport` + `FakeHost`로 전 구간 시나리오 | 59 테스트 |
 | `config.ts` | 신뢰할 수 없는 JSON 검증 테이블 테스트 | 30 테스트 |
 | `index.ts` | 타입체크 + 배선 테스트(가짜 `ExtensionAPI`로 팩토리 구동). **커버리지 제외** | 36 테스트 |
 | `transports/*` | 계약 conformance + 플랫폼별 payload fixture | 86 테스트 |
@@ -289,6 +297,8 @@ const decision = decidePairing({ ..., now: 10, random: digitSequence("987654") }
 | G8 | ~~첨부(이미지) 전달~~ | ✅ 완료 — `Transport.fetchAttachment` + `bridge.attachmentPolicy`가 두 capability를 AND |
 | G9 | ~~다이제스트 데이터 소스~~ | ✅ 완료 — 브랜치/변경 파일/테스트 결과. TODO는 형태 미확정으로 보류 |
 | G10 | Slack 타이핑/리액션 | 플랫폼 제약. 어댑터별 fallback 필요 |
+| G11 | ~~한도를 넘는 펜스 복구~~ | ✅ 완료 — `repairFence`가 조각마다 펜스를 다시 열고 닫는다. I5의 예외로 문서화 |
+| G12 | ~~Discord 길이 계산이 UTF-16이 아니다~~ | ✅ 완료 — `lengthUnit: "utf16"`. 이모지가 2000단위 중 2를 쓴다 |
 
 ---
 

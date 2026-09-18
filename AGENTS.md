@@ -152,6 +152,7 @@ src/
 │   ├── pairing.ts           챌린지 생성/검증 + 렌더링 (코드 유출 방지)
 │   ├── notices.ts           브리지가 스스로 보내는 사용자용 문자열
 │   ├── chunk.ts             UTF-8 안전 청킹
+│   ├── markdown-blocks.ts   헤딩/펜스 인식 구조 분할. 넘치면 chunk.ts가 안전망
 │   ├── markdown.ts          전송 flavor별 마크다운 변환
 │   ├── redact.ts            비밀값 리댁션
 │   ├── digest.ts            작업 다이제스트(공유 카드) 생성
@@ -345,6 +346,9 @@ import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 | 첨부를 호스트만 보고 허용 | 전송이 바이트를 못 주는데 프롬프트만 전달되어 이미지 없는 텍스트가 됨 | 두 조건을 AND: `host.acceptsAttachments && transport.fetchAttachment !== undefined` (`Bridge.attachmentPolicy`) |
 | 첨부 크기를 선언값만 믿음 | `content-length`는 힌트다. 실제로 더 큰 파일이 올 수 있다 | 다운로드 후 base64 길이로 다시 검사 (`bridge.ts`, `discord/index.ts`) |
 | 스트리밍 중 진행 상황을 매 툴마다 새 메시지로 | 채팅 도배, 레이트리밋 | `publishProgress`가 스로틀 + `editKey`로 같은 카드 갱신. 턴마다 `beginTurn()` |
+| **렌더링한 뒤에 청킹** | `## X`가 `<b>X</b>`/`*X*`로 바뀌어 구조 정보가 사라진다. 헤딩이 메시지 끝에 고아로 남고, 한도보다 긴 코드 펜스는 메시지 사이에서 깨진다 | `chunkMarkdown`이 **CommonMark 원문**을 먼저 헤딩/펜스 경계에서 자른다. 렌더링은 조각 단위로, `chunkForTransport`는 한도 보증으로만 남긴다 (`bridge.send`) |
+| **닫는 펜스를 줄 끝에서 찾기** | 펜스 뒤의 빈 줄이 파서에서 펜스 블록에 붙어 있어, `마지막 줄`을 닫는 펜스로 보면 못 찾고 본문에 닫는 펜스가 들어간다(마커 3개, 코드 블록 깨짐) | 닫는 펜스는 **CommonMark 규칙대로 첫 일치 줄**로 찾고, 그 뒤는 마지막 조각에 suffix로 붙인다 (`repairFence`) |
+| **플랫폼이 세는 단위를 code point로 가정** | Discord는 UTF-16 code unit을 센다. 이모지가 많은 답변이 2000을 넘어 잘린다 | `capabilities.lengthUnit`에 `utf16` 추가. Discord는 `utf16`으로 선언 (`measureLength`) |
 | 테스트 러너 출력을 추측으로 파싱 | 버전이 바뀌면 조용히 틀린다 | `core/work.ts`의 패턴을 fixture로 고정하고, 못 찾으면 exit status로 폴백 |
 | **발행 직후 레지스트리 조회가 404/누락** | 발행이 실패한 줄 알고 되돌리려 함 | npm 전파에 몇 분 걸린다. **진짜는 워크플로 로그**다: `Publishing to … with tag …`, `Signed provenance statement`, `+ pkg@version`을 확인하고 `npm dist-tag ls`로 재확인하라 |
 | 이미 발행된 버전에 태그를 붙여 재발행 시도 | npm이 거부한다. provenance는 다시 쓸 수 없다 | `release.yml`이 발행 전에 레지스트리를 확인해 이미 있으면 publish를 건너뛰고 GitHub Release만 만든다 |
@@ -404,11 +408,12 @@ docs(agents): document the transport conformance checklist
 | 단일 인스턴스 락 | ✅ 완료 |
 | `/connect doctor` | ✅ 완료 |
 | **Discord 전송** | ✅ 완료 (봇 SDK 없이 게이트웨이 직접 구현) |
-| 테스트 | 427 통과 / typecheck 0 에러 / 3회 연속 안정 |
+| 테스트 | 488 통과 / typecheck 0 에러 / 3회 연속 안정 |
 | **첨부(이미지) 전달** | ✅ 완료 (양쪽 capability 확인 + 다운로드 후 크기 재검사) |
 | **진행 상황 edit-in-place** | ✅ 완료 (턴당 카드 1개, 스로틀, 편집 실패 시 폴백) |
 | **추론 진행 카드 + typing** | ✅ 완료 (툴 없는 구간은 `thinking…`, 선택적 `typing()`은 베스트 에포트) |
 | **긴 응답 분할** | ✅ 완료 (전송 한도 단위로 분할, `maxChunks` 상한 + 잘림 안내) |
+| **의미 단위(헤딩) 분할** | ✅ 완료 (섹션 경계 우선, 헤딩 고아 없음, 펜스 원자성 + 초과 펜스 복구) |
 | **다이제스트 데이터 소스** | ✅ 완료 (브랜치 / 변경 파일 / 테스트 결과) |
 | Telegram · Slack 전송 | ❌ 미구현 |
 | TODO를 다이제스트에 포함 | ❌ 미구현 — 어떤 TODO 확장의 형태를 읽을지 결정 필요 |
