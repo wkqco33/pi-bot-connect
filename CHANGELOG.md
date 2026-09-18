@@ -9,6 +9,19 @@
 
 ## [Unreleased]
 
+### Planned
+
+- Telegram 전송 (롱폴링, 4096 bytes, HTML). 코어는 이미 전송 무관이므로 어댑터만 추가하면 된다
+- Slack 전송 (Socket Mode, mrkdwn)
+- 전송 conformance 테스트 키트 (`src/transports/transport-contract.test.ts`)
+- 다이제스트에 TODO 포함 (세션 엔트리의 형태를 먼저 확인한 뒤 방어적으로 파싱)
+- 엔벨로프 record/replay 하네스
+
+## [0.3.0] - 2026-09-18
+
+긴 응답을 마크다운 구조 단위로 나누고, 길이를 플랫폼이 실제로 세는 단위로 계산한다.
+**실제 Discord 왕복은 이 릴리스에서 처음 확인되었다** (텍스트·이미지 프롬프트, 진행 카드, 긴 답변 분할).
+
 ### Changed
 
 - 긴 응답을 크기(2000자)로만 자르던 것을 마크다운 구조 기준으로 바꿨다. 헤딩 경계에서 먼저 자르고, 헤딩이 그 본문에서 떨어져 나가는 일이 없어진다. 코드 펜스는 펜스 자체가 한도를 넘지 않는 한 분할되지 않는다
@@ -20,14 +33,6 @@
 
 - `src/core/markdown-blocks.ts` — 펜스 인식 CommonMark 블록 파서와 섹션 패킹. `chunkText`는 전송 한도 보증 안전망으로 남는다(`measureLength` 추가)
 - 한도보다 긴 코드 블록은 조각마다 여는/닫는 펜스를 다시 붙여 각 메시지가 유효한 코드 블록이 된다. 이 경우에만 `join(chunks) === source`가 성립하지 않는다(코드 내용은 그대로)
-
-### Planned
-
-- Telegram 전송 (롱폴링, 4096 bytes, HTML). 코어는 이미 전송 무관이므로 어댑터만 추가하면 된다
-- Slack 전송 (Socket Mode, mrkdwn)
-- 전송 conformance 테스트 키트 (`src/transports/transport-contract.test.ts`)
-- 다이제스트에 TODO 포함 (세션 엔트리의 형태를 먼저 확인한 뒤 방어적으로 파싱)
-- 엔벨로프 record/replay 하네스
 - 프롬프트 인젝션 방어 (도구 정책/승인 게이트). 채팅을 다른 사람과 공유하는 순간 필요해진다 (G1)
 
 ## [0.2.0] - 2026-09-18
