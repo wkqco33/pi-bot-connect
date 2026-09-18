@@ -34,6 +34,7 @@ const BRIDGE_KEYS = new Set([
 	"digest",
 	"attachments",
 	"progressMinIntervalMs",
+	"maxChunks",
 ]);
 
 const TOP_LEVEL_KEYS = new Set(["bridge", "transports"]);
@@ -183,6 +184,9 @@ function parseBridgeSection(raw: unknown, ctx: Context): Partial<BridgeConfig> {
 
 	const progressMinIntervalMs = readIntegerInRange(ctx, raw, "progressMinIntervalMs", path, 0, 60_000);
 	if (progressMinIntervalMs !== undefined) config.progressMinIntervalMs = progressMinIntervalMs;
+
+	const maxChunks = readIntegerInRange(ctx, raw, "maxChunks", path, 1, 50);
+	if (maxChunks !== undefined) config.maxChunks = maxChunks;
 
 	if (raw.attachments !== undefined) {
 		const attachmentPath = `${path}.attachments`;

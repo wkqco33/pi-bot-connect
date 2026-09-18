@@ -137,6 +137,12 @@ export interface Transport {
 	 */
 	fetchAttachment?(attachment: InboundAttachment): Promise<FetchedAttachment>;
 	/**
+	 * Optional "the bot is working" hint for the platform (a typing indicator).
+	 * Best-effort: the bridge ignores failures and this is not a delivery
+	 * guarantee. Implementations should throttle themselves.
+	 */
+	typing?(conversationId: string): Promise<void>;
+	/**
 	 * Optional one-line health detail for `/connect doctor`.
 	 * MUST NOT contain credentials, tokens or message bodies.
 	 */
@@ -185,6 +191,11 @@ export interface BridgeConfig {
 	};
 	/** Minimum gap between progress updates within a turn. */
 	readonly progressMinIntervalMs: number;
+	/**
+	 * Maximum messages one outbound body may become. Larger bodies are cut off
+	 * with a truncation notice instead of flooding the chat.
+	 */
+	readonly maxChunks: number;
 }
 
 export const DEFAULT_CONFIG: BridgeConfig = {
@@ -204,6 +215,7 @@ export const DEFAULT_CONFIG: BridgeConfig = {
 		maxBytes: 8 * 1024 * 1024,
 	},
 	progressMinIntervalMs: 1000,
+	maxChunks: 8,
 };
 
 export function resolveConfig(overrides: Partial<BridgeConfig> = {}): BridgeConfig {

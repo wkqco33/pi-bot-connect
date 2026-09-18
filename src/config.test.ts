@@ -183,6 +183,26 @@ describe("parseConfigFile — attachments", () => {
 	});
 });
 
+describe("parseConfigFile — outbound chunk budget", () => {
+	it("accepts a chunk budget in range", () => {
+		expect(parseConfigFile({ bridge: { maxChunks: 12 } }).config.maxChunks).toBe(12);
+	});
+
+	it("rejects a budget below one", () => {
+		expect(parseConfigFile({ bridge: { maxChunks: 0 } }).errors).toContain(
+			"bridge.maxChunks: expected an integer between 1 and 50, received 0",
+		);
+	});
+
+	it("rejects a budget above the cap", () => {
+		expect(parseConfigFile({ bridge: { maxChunks: 51 } }).errors).toHaveLength(1);
+	});
+
+	it("rejects a fractional budget", () => {
+		expect(parseConfigFile({ bridge: { maxChunks: 2.5 } }).errors).toHaveLength(1);
+	});
+});
+
 describe("parseConfigFile — progress interval", () => {
 	it("accepts an interval in range, including zero", () => {
 		expect(parseConfigFile({ bridge: { progressMinIntervalMs: 0 } }).config.progressMinIntervalMs).toBe(0);

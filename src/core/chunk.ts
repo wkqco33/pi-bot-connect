@@ -110,3 +110,22 @@ export function chunkForTransport(
 		unit: capabilities.lengthUnit,
 	});
 }
+
+export interface CappedChunks {
+	readonly chunks: readonly string[];
+	/** Chunks that did not fit the budget and were not sent. */
+	readonly dropped: number;
+}
+
+/**
+ * Bounds how many messages one outbound body may become. Without a cap a single
+ * very long answer would post dozens of messages and hit platform rate limits;
+ * the caller is expected to tell the user that the tail was dropped.
+ */
+export function capChunkCount(chunks: readonly string[], maxChunks: number): CappedChunks {
+	if (!Number.isInteger(maxChunks) || maxChunks < 1) {
+		throw new RangeError(`capChunkCount: maxChunks must be a positive integer, received ${maxChunks}`);
+	}
+	if (chunks.length <= maxChunks) return { chunks, dropped: 0 };
+	return { chunks: chunks.slice(0, maxChunks), dropped: chunks.length - maxChunks };
+}

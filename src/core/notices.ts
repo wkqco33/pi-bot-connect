@@ -25,6 +25,11 @@ export const ATTACHMENT_TOO_MANY_NOTICE =
 export const ATTACHMENT_FETCH_FAILED_NOTICE =
 	"I could not download that image, so I did not send it. Try again or describe it in text.";
 
+/** Sent when one outbound body was longer than the configured chunk budget. */
+export function truncatedNotice(dropped: number): string {
+	return `[truncated: ${dropped} more message(s) were not sent]`;
+}
+
 /** Sent when a prompt arrives for a paused conversation. */
 export const PAUSED_NOTICE = "Delivery is paused. Send /resume to continue.";
 

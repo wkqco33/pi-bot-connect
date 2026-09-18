@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chunkForTransport, chunkText } from "./chunk.js";
+import { capChunkCount, chunkForTransport, chunkText } from "./chunk.js";
 
 const utf8Bytes = (value: string): number => new TextEncoder().encode(value).length;
 
@@ -84,6 +84,32 @@ describe("chunkText", () => {
 			"bbb|",
 			"ccc",
 		]);
+	});
+});
+
+describe("capChunkCount", () => {
+	it("keeps every chunk when the count is within budget", () => {
+		expect(capChunkCount(["a", "b"], 2)).toEqual({ chunks: ["a", "b"], dropped: 0 });
+	});
+
+	it("reports how many chunks were dropped", () => {
+		expect(capChunkCount(["a", "b", "c", "d"], 2)).toEqual({ chunks: ["a", "b"], dropped: 2 });
+	});
+
+	it("keeps a single chunk when the budget is one", () => {
+		expect(capChunkCount(["a", "b"], 1)).toEqual({ chunks: ["a"], dropped: 1 });
+	});
+
+	it("accepts an empty chunk list", () => {
+		expect(capChunkCount([], 3)).toEqual({ chunks: [], dropped: 0 });
+	});
+
+	it("rejects a budget below one", () => {
+		expect(() => capChunkCount(["a"], 0)).toThrow(RangeError);
+	});
+
+	it("rejects a fractional budget", () => {
+		expect(() => capChunkCount(["a"], 1.5)).toThrow(RangeError);
 	});
 });
 
