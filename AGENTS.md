@@ -421,8 +421,9 @@ docs(agents): document the transport conformance checklist
 | 상태 영속화 (세션별 격리) | ✅ 완료 |
 | 단일 인스턴스 락 | ✅ 완료 |
 | `/connect doctor` | ✅ 완료 |
+| `/connect version` | ✅ 완료 (설치된 `package.json`을 런타임에 읽는다) |
 | **Discord 전송** | ✅ 완료 (봇 SDK 없이 게이트웨이 직접 구현) |
-| 테스트 | 651 통과 / typecheck 0 에러 / 3회 연속 안정 |
+| 테스트 | 663 통과 / typecheck 0 에러 / 3회 연속 안정 |
 | **첨부(이미지) 전달** | ✅ 완료 (양쪽 capability 확인 + 다운로드 후 크기 재검사) |
 | **진행 상황 edit-in-place** | ✅ 완료 (턴당 카드 1개, 스로틀, 편집 실패 시 폴백) |
 | **추론 진행 카드 + typing** | ✅ 완료 (툴 없는 구간은 `thinking…`, 선택적 `typing()`은 베스트 에포트) |

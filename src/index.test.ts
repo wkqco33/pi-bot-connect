@@ -310,7 +310,7 @@ describe("adapter — local command surface", () => {
 	it("lists the local subcommands", async () => {
 		const { pi, ctx } = await start();
 		await pi.run("status", ctx);
-		expect(ctx.lastNotification).toContain("status|doctor|pair|digest|pause|resume|disconnect|config");
+		expect(ctx.lastNotification).toContain("status|doctor|version|pair|digest|pause|resume|disconnect|config");
 	});
 
 	it("points at the available transports when none is configured", async () => {
@@ -627,5 +627,34 @@ describe("adapter — digest TODO source", () => {
 
 		expect(ctx.lastNotification).toContain("Pending (1/2)");
 		expect(ctx.lastNotification).toContain("ship it");
+	});
+});
+
+describe("adapter — installed version", () => {
+	it("reports the installed version from the package manifest", async () => {
+		const { pi, ctx } = await start();
+		await pi.run("version", ctx);
+		expect(ctx.lastNotification).toMatch(/pi-bot-connect \d+\.\d+\.\d+/);
+		expect(ctx.lastNotification).toContain(`node ${process.version}`);
+	});
+
+	it("accepts --version and -v as aliases", async () => {
+		const { pi, ctx } = await start();
+		await pi.run("--version", ctx);
+		expect(ctx.lastNotification).toMatch(/pi-bot-connect \d+\.\d+\.\d+/);
+		await pi.run("-v", ctx);
+		expect(ctx.lastNotification).toMatch(/pi-bot-connect \d+\.\d+\.\d+/);
+	});
+
+	it("includes the extension version in status", async () => {
+		const { pi, ctx } = await start();
+		await pi.run("status", ctx);
+		expect(ctx.lastNotification).toMatch(/- extension: pi-bot-connect \d+\.\d+\.\d+/);
+	});
+
+	it("includes the extension version in doctor", async () => {
+		const { pi, ctx } = await start();
+		await pi.run("doctor", ctx);
+		expect(ctx.lastNotification).toMatch(/- extension: pi-bot-connect \d+\.\d+\.\d+/);
 	});
 });

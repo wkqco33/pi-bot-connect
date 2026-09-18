@@ -9,6 +9,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/connect version` (`--version`/`-v` 별칭) — 설치된 확장 버전·Node 버전·설치 경로를 표시한다. `/connect status`와 `/connect doctor`에도 버전 줄이 들어간다. pi가 확장 버전 getter를 제공하지 않아 설치된 `package.json`을 런타임에 읽는다
+
 ### Planned
 
 - Slack 전송 (Socket Mode, mrkdwn, 4000자). conformance harness 1개 + 팩토리 등록이면 된다

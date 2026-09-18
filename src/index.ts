@@ -14,6 +14,7 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { CONFIG_DIR_NAME, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Bridge, MemoryBridgeStore, type BridgeHost, type BridgeStore } from "./bridge.js";
 import { parseConfigFile } from "./config.js";
@@ -23,6 +24,7 @@ import type { DigestFileChange } from "./core/digest.js";
 import type { DigestTodo } from "./core/digest.js";
 import { extractAssistantText, extractToolText, summarize } from "./core/message.js";
 import { formatChallengeCode } from "./core/pairing.js";
+import { formatVersionReport, parsePackageMeta, VERSION_UNAVAILABLE_NOTICE, type PackageMeta } from "./core/version.js";
 import { toolEndLabel, toolStartLabel } from "./core/progress.js";
 import { extractMarkdownTodos } from "./core/todo.js";
 import {
@@ -127,6 +129,21 @@ async function loadBridgeConfig(cwd: string): Promise<LoadedConfig> {
 }
 
 /**
+ * Installed extension directory. pi exposes no version getter, so the manifest
+ * next to `src/` is the source of truth. It resolves inside the installed
+ * package because the published tarball keeps `src/` and `package.json` together.
+ */
+function packagePath(): string {
+	return fileURLToPath(new URL("../package.json", import.meta.url));
+}
+
+async function loadPackageMeta(): Promise<PackageMeta | null> {
+	const raw = await readJsonFile(packagePath());
+	if (raw === undefined || !raw.ok) return null;
+	return parsePackageMeta(raw.value);
+}
+
+/**
  * Directory for durable bridge state and lock files.
  * `PI_BOT_CONNECT_STATE` overrides the state file location (used by tests).
  */
@@ -205,6 +222,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 	const loadTime = await loadBridgeConfig(process.cwd());
 	const localCommand = loadTime.config.localCommand;
+	const extensionMeta = await loadPackageMeta();
 
 	let bridge: Bridge | null = null;
 	let store: FileBridgeStore | null = null;
@@ -269,11 +287,28 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 		return ids.length > 0 ? `${COMMAND_KEY}: ${ids.join(",")}` : `${COMMAND_KEY}: no transports`;
 	}
 
+	function versionLine(): string {
+		return extensionMeta === null
+			? "- extension: version unknown"
+			: `- extension: ${extensionMeta.name} ${extensionMeta.version}`;
+	}
+
+	function renderVersion(): string {
+		if (extensionMeta === null) return VERSION_UNAVAILABLE_NOTICE;
+		return formatVersionReport({
+			name: extensionMeta.name,
+			version: extensionMeta.version,
+			node: process.version,
+			location: dirname(packagePath()),
+		});
+	}
+
 	function renderStatus(): string {
 		if (!bridge) return `${COMMAND_KEY}: no active session.`;
 		const snapshot = bridge.snapshot();
 		const lines = [
 			`${COMMAND_KEY} status`,
+			versionLine(),
 			`- transports: ${snapshot.transports.length > 0 ? snapshot.transports.join(", ") : "(none configured)"}`,
 			`- paired chats: ${snapshot.trusted.length}`,
 			`- conversations: ${snapshot.conversations}`,
@@ -285,12 +320,12 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 			const available = factories.map((factory) => factory.id).join(", ");
 			lines.push("", `Available transports: ${available}. Configure one under "transports" in the config file.`);
 		}
-		lines.push("", `Local commands: /${localCommand} status|doctor|pair|digest|pause|resume|disconnect|config`);
+		lines.push("", `Local commands: /${localCommand} status|doctor|version|pair|digest|pause|resume|disconnect|config`);
 		return lines.join("\n");
 	}
 
 	function renderDoctor(): { text: string; healthy: boolean } {
-		const lines = [`${COMMAND_KEY} doctor`];
+		const lines = [`${COMMAND_KEY} doctor`, versionLine()];
 		if (!bridge) return { text: `${COMMAND_KEY}: no active session.`, healthy: false };
 
 		const diagnostics = bridge.diagnostics();
@@ -385,6 +420,11 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 			return;
 		}
 
+		if (sub === "version" || sub === "--version" || sub === "-v") {
+			ctx.ui.notify(renderVersion(), extensionMeta === null ? "warning" : "info");
+			return;
+		}
+
 		if (sub === "doctor") {
 			const report = renderDoctor();
 			ctx.ui.notify(report.text, report.healthy ? "info" : "warning");
@@ -451,7 +491,8 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 	// --- local command surface ------------------------------------------------
 
 	pi.registerCommand(localCommand, {
-		description: "Local control for the messenger bridge (status, doctor, pair, digest, pause, resume, disconnect)",
+		description:
+			"Local control for the messenger bridge (status, doctor, version, pair, digest, pause, resume, disconnect)",
 		handler: async (args, ctx) => {
 			await handleLocalCommand(args, ctx);
 		},
