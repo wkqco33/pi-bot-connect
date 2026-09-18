@@ -61,7 +61,7 @@ interface Transport {
 4. **자격증명은 환경변수에서 읽는다.** 설정 파일에는 env 변수 *이름*만 저장한다.
 5. **`start()`는 백그라운드 리소스를 만들고, `stop()`은 그것을 정리한다.** `stop()`은 두 번 불려도 안전해야 한다.
 6. **재연결/백오프는 어댑터 책임이다.** 코어는 재시도를 하지 않는다.
-7. **첨부를 지원하려면 `fetchAttachment`를 구현해야 한다.** `capabilities.attachments: true`는 운반 가능 선언일 뿐이고, 실제 전달 여부는 브리지가 두 capability를 AND해서 결정한다.
+7. **첨부를 지원하려면 `fetchAttachment`를 구현해야 한다.** `capabilities.attachments: true`는 운반 가능 선언일 뿐이고, 실제 전달 여부는 브리지가 두 capability를 AND해서 결정한다. `mediaType`은 **선언값이 아니라 응답이 실제로 준 content type**을 보고해야 한다.
 8. **conformance 테스트를 통과한다** (아래 5장).
 9. **진행 표시를 지원하려면 `typing()`을 구현한다.** 선택 멤버다. 브리지는 실패를 삼키고(베스트 에포트), 어댑터 스스로 호출 빈도를 제한해야 한다. `typing()`이 없으면 아무 일도 일어나지 않아야 한다.
 
@@ -108,6 +108,7 @@ Discord는 스레드에서 `channel_id`가 스레드 자체의 id이므로 `conv
 | I22 | 한 번의 송신 본문은 `maxChunks`개를 넘지 않는다. 초과분은 조용히 버리지 않고 잘렸다고 알린다. | `chunk.test.ts`, `bridge.test.ts` |
 | I23 | 툴 이벤트가 없는 추론 구간에도 "thinking…" 카드가 표시된다. | `progress.test.ts`, `bridge.test.ts` |
 | I24 | `typing()` 실패는 턴을 실패시키지 않는다. 없거나 거부되면 그냥 진행한다. | `bridge.test.ts`, `discord/index.test.ts` |
+| I25 | 첨부의 media type은 선언값이 아니라 실제로 받은 바이트의 content type으로 재검사한다. | `bridge.test.ts`, `discord/index.test.ts` |
 
 ---
 
@@ -188,6 +189,7 @@ const decision = decidePairing({ ..., now: 10, random: digitSequence("987654") }
 - [ ] `send()`가 시작 전이면 명확히 throw한다
 - [ ] 게이트웨이/폴링 연결에 READY 타임아웃이 있다 (무한 대기 금지)
 - [ ] 첨부를 지원하면 `fetchAttachment`가 자체 크기 상한을 적용하고, 선언 크기가 아니라 실제 바이트로 검사한다
+- [ ] `fetchAttachment`의 `mediaType`은 응답 헤더에서 읽고, 없으면 선언값으로 폴백한다
 - [ ] `typing()`을 구현했다면 스스로 호출 빈도를 제한하고, 실패해도 전송을 막지 않는다
 
 ---
