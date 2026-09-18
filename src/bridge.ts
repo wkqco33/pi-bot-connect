@@ -9,9 +9,10 @@
 import { executeRemoteCommand, type RemoteCommandContext } from "./core/commands.js";
 import { chunkForTransport } from "./core/chunk.js";
 import { renderMarkdown } from "./core/markdown.js";
+import { ATTACHMENTS_UNSUPPORTED_NOTICE, PAUSED_NOTICE, unknownCommandNotice } from "./core/notices.js";
 import { isFreshChallenge, pairingCodeNotice, pairingPrompt, pairingSuccessPrompt, type PendingChallenge } from "./core/pairing.js";
 import { redactSecrets } from "./core/redact.js";
-import { route } from "./core/router.js";
+import { route, type UnsupportedFeature } from "./core/router.js";
 import {
 	conversationKey,
 	identityKey,
@@ -21,6 +22,7 @@ import {
 	type Logger,
 	type OutboundKind,
 	type Transport,
+	type TransportDiagnostics,
 	type TransportId,
 } from "./core/types.js";
 
@@ -124,12 +126,19 @@ export interface BridgeHost {
 	abort(): void;
 	isIdle(): boolean;
 	notify(text: string, level?: "info" | "warning" | "error"): void;
+	/** False until the host can forward attachment bytes to the model. */
+	readonly acceptsAttachments: boolean;
 	readonly cwd: string;
 	readonly sessionName?: string;
 	now(): number;
 	random(): number;
 	readonly logger: Logger;
 }
+
+/** Renders a router `unsupported` action for the user. */
+const UNSUPPORTED_NOTICES: Record<UnsupportedFeature, string> = {
+	attachments: ATTACHMENTS_UNSUPPORTED_NOTICE,
+};
 
 export interface BridgeOptions {
 	readonly host: BridgeHost;
@@ -143,6 +152,7 @@ export class Bridge {
 
 	private readonly host: BridgeHost;
 	private readonly transports = new Map<TransportId, Transport>();
+	private readonly startErrors = new Map<TransportId, string>();
 
 	constructor(options: BridgeOptions) {
 		this.host = options.host;
@@ -151,20 +161,55 @@ export class Bridge {
 	}
 
 	/** Registers and starts a transport. */
+	/**
+	 * Registers and starts a transport.
+	 *
+	 * A transport that fails to start is recorded, not thrown: a bad token must
+	 * not tear down the session or block other transports. `/connect doctor`
+	 * surfaces the reason.
+	 */
 	async register(transport: Transport): Promise<void> {
 		if (this.transports.has(transport.id)) {
 			throw new Error(`Transport '${transport.id}' is already registered`);
 		}
 		this.transports.set(transport.id, transport);
-		await transport.start((envelope) => this.onEnvelope(envelope));
-		this.host.logger.info("transport started", { transport: transport.id });
+		try {
+			await transport.start((envelope) => this.onEnvelope(envelope));
+			this.startErrors.delete(transport.id);
+			this.host.logger.info("transport started", { transport: transport.id });
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.startErrors.set(transport.id, message);
+			this.host.logger.error("transport failed to start", { transport: transport.id, error: message });
+			this.host.notify(`${transport.id} failed to start: ${message}`, "error");
+		}
 	}
 
 	async stop(): Promise<void> {
 		for (const transport of this.transports.values()) {
-			await transport.stop();
+			try {
+				await transport.stop();
+			} catch (error) {
+				this.host.logger.warn("transport failed to stop", {
+					transport: transport.id,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
 		}
 		this.transports.clear();
+	}
+
+	/** Health view for `/connect doctor`. Never contains secrets. */
+	diagnostics(): readonly TransportDiagnostics[] {
+		return [...this.transports.values()].map((transport) => {
+			const error = this.startErrors.get(transport.id);
+			const detail = error ?? transport.diagnose?.();
+			return {
+				id: transport.id,
+				status: error !== undefined ? "error" : "running",
+				...(detail === undefined ? {} : { detail }),
+			};
+		});
 	}
 
 	get transportIds(): readonly TransportId[] {
@@ -182,6 +227,7 @@ export class Bridge {
 			authenticated,
 			pendingChallenge: this.store.getPending(key),
 			busy: !this.host.isIdle(),
+			acceptsAttachments: this.host.acceptsAttachments,
 			now: this.host.now(),
 			random: () => this.host.random(),
 		});
@@ -236,13 +282,18 @@ export class Bridge {
 
 		this.remember(envelope);
 
+		if (action.type === "unsupported") {
+			await this.reply(envelope, UNSUPPORTED_NOTICES[action.feature]);
+			return;
+		}
+
 		if (action.type === "command") {
 			await this.runCommand(action.name, action.args, envelope, identity, key);
 			return;
 		}
 
 		if (this.store.isPaused(key)) {
-			await this.reply(envelope, "Delivery is paused. Send /resume to continue.");
+			await this.reply(envelope, PAUSED_NOTICE);
 			return;
 		}
 
@@ -276,7 +327,7 @@ export class Bridge {
 
 		const result = executeRemoteCommand(name, args, context);
 		if (!result) {
-			await this.reply(envelope, `Unknown command '${name}'.`);
+			await this.reply(envelope, unknownCommandNotice(name));
 			return;
 		}
 

@@ -101,6 +101,18 @@ export interface Transport {
 	start(handler: EnvelopeHandler): Promise<void>;
 	stop(): Promise<void>;
 	send(message: OutboundMessage): Promise<SendReceipt>;
+	/**
+	 * Optional one-line health detail for `/connect doctor`.
+	 * MUST NOT contain credentials, tokens or message bodies.
+	 */
+	diagnose?(): string;
+}
+
+export interface TransportDiagnostics {
+	readonly id: TransportId;
+	readonly status: "running" | "stopped" | "error";
+	/** Human-readable detail. Never contains secrets. */
+	readonly detail?: string;
 }
 
 export interface BridgeConfig {

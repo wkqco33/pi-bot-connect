@@ -1,13 +1,21 @@
 import { describe, expect, it } from "vitest";
 import { Bridge, MemoryBridgeStore, type BridgeHost } from "./bridge.js";
 import { createLogger, MemoryLogSink } from "./core/logger.js";
-import { noopLogger, type BridgeConfig, type TransportCapabilities } from "./core/types.js";
-import { FakeTransport } from "./transports/fake.js";
+import { ATTACHMENTS_UNSUPPORTED_NOTICE, PAUSED_NOTICE } from "./core/notices.js";
+import {
+	noopLogger,
+	type BridgeConfig,
+	type SendReceipt,
+	type Transport,
+	type TransportCapabilities,
+} from "./core/types.js";
+import { FAKE_CAPABILITIES, FakeTransport } from "./transports/fake.js";
 
 class FakeHost implements BridgeHost {
 	readonly cwd = "/work/project";
 	sessionName: string | undefined = "test-session";
 	logger = noopLogger;
+	acceptsAttachments = false;
 	readonly prompts: Array<{ text: string; deliverAs?: "steer" | "followUp" }> = [];
 	readonly notifications: string[] = [];
 	aborts = 0;
@@ -37,6 +45,55 @@ class FakeHost implements BridgeHost {
 
 	random(): number {
 		return this.rng();
+	}
+}
+
+/** Fails to start, like a bad token or a held lock. */
+class FailingTransport implements Transport {
+	readonly id = "failing";
+	readonly capabilities = FAKE_CAPABILITIES;
+
+	constructor(private readonly message: string) {}
+
+	start(): Promise<void> {
+		return Promise.reject(new Error(this.message));
+	}
+
+	stop(): Promise<void> {
+		return Promise.resolve();
+	}
+
+	send(): Promise<SendReceipt> {
+		return Promise.reject(new Error("not started"));
+	}
+}
+
+/** Starts fine but throws while shutting down. */
+class FailingStopTransport implements Transport {
+	readonly id = "failing-stop";
+	readonly capabilities = FAKE_CAPABILITIES;
+
+	start(): Promise<void> {
+		return Promise.resolve();
+	}
+
+	stop(): Promise<void> {
+		return Promise.reject(new Error("cannot stop"));
+	}
+
+	send(): Promise<SendReceipt> {
+		return Promise.resolve({ messageId: "failing-stop-1" });
+	}
+}
+
+/** Contributes health detail for `/connect doctor`. */
+class DiagnosingTransport extends FakeTransport {
+	constructor() {
+		super({ id: "diagnosing" });
+	}
+
+	diagnose(): string {
+		return "connected as bot#1";
 	}
 }
 
@@ -250,6 +307,30 @@ describe("Bridge — outbound shaping", () => {
 		await bridge.send({ transport: "nope", conversationId: "conv-1", kind: "reply", text: "hello" });
 		expect(transport.sent).toEqual([]);
 	});
+
+	it("refuses an attachment the host cannot forward", async () => {
+		const { host, transport } = await setup();
+		await transport.inject({
+			text: "what is this?",
+			attachments: [{ kind: "image", mediaType: "image/png", ref: "file-1" }],
+		});
+		expect(transport.lastSent?.text).toBe(ATTACHMENTS_UNSUPPORTED_NOTICE);
+		expect(host.prompts).toEqual([]);
+	});
+
+	it("forwards an attachment when the host accepts them", async () => {
+		const { host, transport } = await setup();
+		host.acceptsAttachments = true;
+		await transport.inject({ text: "", attachments: [{ kind: "image", mediaType: "image/png", ref: "f" }] });
+		expect(host.prompts).toEqual([{ text: "Describe the attached image." }]);
+	});
+
+	it("uses the shared paused notice", async () => {
+		const { transport } = await setup();
+		await transport.inject({ text: "/pause" });
+		await transport.inject({ text: "do work" });
+		expect(transport.lastSent?.text).toBe(PAUSED_NOTICE);
+	});
 });
 
 describe("Bridge — publish", () => {
@@ -293,6 +374,40 @@ describe("Bridge — lifecycle", () => {
 		await bridge.stop();
 		expect(transport.started).toBe(false);
 		expect(bridge.transportIds).toEqual([]);
+	});
+
+	it("records a transport that fails to start instead of throwing", async () => {
+		const host = new FakeHost();
+		const bridge = new Bridge({ host });
+		await bridge.register(new FailingTransport("bad token"));
+
+		expect(bridge.transportIds).toEqual(["failing"]);
+		expect(host.notifications.join("\n")).toContain("failing failed to start: bad token");
+		expect(bridge.diagnostics()).toEqual([{ id: "failing", status: "error", detail: "bad token" }]);
+	});
+
+	it("keeps running when one transport fails to stop", async () => {
+		const host = new FakeHost();
+		const bridge = new Bridge({ host });
+		const healthy = new FakeTransport();
+		await bridge.register(healthy);
+		await bridge.register(new FailingStopTransport());
+
+		await bridge.stop();
+		expect(healthy.started).toBe(false);
+		expect(bridge.transportIds).toEqual([]);
+	});
+
+	it("reports running transports and their own diagnostics", async () => {
+		const host = new FakeHost();
+		const bridge = new Bridge({ host });
+		await bridge.register(new DiagnosingTransport());
+		expect(bridge.diagnostics()).toEqual([{ id: "diagnosing", status: "running", detail: "connected as bot#1" }]);
+	});
+
+	it("reports a running transport with no diagnostics detail", async () => {
+		const { bridge } = await setup();
+		expect(bridge.diagnostics()).toEqual([{ id: "fake", status: "running" }]);
 	});
 });
 

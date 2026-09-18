@@ -15,13 +15,14 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { CONFIG_DIR_NAME, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Bridge, type BridgeHost } from "./bridge.js";
+import { Bridge, MemoryBridgeStore, type BridgeHost, type BridgeStore } from "./bridge.js";
 import { parseConfigFile } from "./config.js";
 import { formatDuration } from "./core/commands.js";
 import { buildWorkDigest } from "./core/digest.js";
 import { extractAssistantText, summarize } from "./core/message.js";
 import { formatChallengeCode } from "./core/pairing.js";
 import { resolveConfig, type BridgeConfig, type Logger } from "./core/types.js";
+import { FileBridgeStore } from "./file-store.js";
 import { createTransports, listTransportFactories } from "./transports/index.js";
 
 const COMMAND_KEY = "bot-connect";
@@ -113,6 +114,33 @@ async function loadBridgeConfig(cwd: string): Promise<LoadedConfig> {
 	return { config: resolveConfig(merged), transports, notes };
 }
 
+/** Durable bridge state (trust, pending codes, broadcast targets). */
+function statePath(): string {
+	const override = process.env.PI_BOT_CONNECT_STATE;
+	if (override !== undefined && override.length > 0) return override;
+	return join(homedir(), CONFIG_DIR_NAME, "agent", `${COMMAND_KEY}-state.json`);
+}
+
+/**
+ * Stable across `pi --continue` and `/reload`, new for `/new`. That is exactly
+ * the key we want for scoping trust and broadcast targets.
+ */
+function sessionKey(ctx: ExtensionContext): string {
+	try {
+		const id = ctx.sessionManager.getSessionId();
+		if (typeof id === "string" && id.length > 0) return id;
+	} catch (error) {
+		logger.debug("session id unavailable, falling back to the session file", { error: String(error) });
+	}
+	try {
+		const file = ctx.sessionManager.getSessionFile();
+		if (typeof file === "string" && file.length > 0) return file;
+	} catch (error) {
+		logger.debug("session file unavailable, using an ephemeral key", { error: String(error) });
+	}
+	return "ephemeral";
+}
+
 // ---------------------------------------------------------------------------
 // Extension
 // ---------------------------------------------------------------------------
@@ -122,6 +150,8 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 	const localCommand = loadTime.config.localCommand;
 
 	let bridge: Bridge | null = null;
+	let store: FileBridgeStore | null = null;
+	let currentSessionKey = "ephemeral";
 	let sessionCtx: ExtensionContext | null = null;
 	let runningTool: string | undefined;
 	let lastAssistantText = "";
@@ -155,6 +185,9 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 		notify(text, level) {
 			sessionCtx?.ui.notify(`[${COMMAND_KEY}] ${text}`, level ?? "info");
 		},
+		// The host cannot hand attachment bytes to the model yet, so the router
+		// rejects them instead of inventing a prompt about a missing image.
+		acceptsAttachments: false,
 		get cwd() {
 			return sessionCtx?.cwd ?? process.cwd();
 		},
@@ -187,8 +220,38 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 		if (factories.length === 0) {
 			lines.push("", "No transports are implemented yet. See docs/architecture.md.");
 		}
-		lines.push("", `Local commands: /${localCommand} status|pair|digest|pause|resume|disconnect|config`);
+		lines.push("", `Local commands: /${localCommand} status|doctor|pair|digest|pause|resume|disconnect|config`);
 		return lines.join("\n");
+	}
+
+	function renderDoctor(): { text: string; healthy: boolean } {
+		const lines = [`${COMMAND_KEY} doctor`];
+		if (!bridge) return { text: `${COMMAND_KEY}: no active session.`, healthy: false };
+
+		const diagnostics = bridge.diagnostics();
+		if (diagnostics.length === 0) lines.push("- transports: none registered");
+		for (const entry of diagnostics) {
+			lines.push(`- ${entry.id}: ${entry.status}${entry.detail === undefined ? "" : ` — ${entry.detail}`}`);
+		}
+
+		lines.push(`- session key: ${currentSessionKey}`);
+		lines.push(`- state file: ${statePath()} (${store ? "persistent" : "in-memory"})`);
+
+		const snapshot = bridge.snapshot();
+		lines.push(`- paired chats: ${snapshot.trusted.length}`);
+		lines.push(`- broadcast targets: ${snapshot.conversations}`);
+		lines.push(`- pending codes: ${snapshot.pending.length}`);
+
+		lines.push(
+			"",
+			"If a transport is not working, check in this order:",
+			"1. credential present in the environment (never in the config file)",
+			"2. bot invited/installed where you are talking to it",
+			"3. privileged intents or message scopes enabled in the platform app settings",
+			"4. no other pi process holds the same bot credential",
+		);
+
+		return { text: lines.join("\n"), healthy: !diagnostics.some((entry) => entry.status === "error") };
 	}
 
 	async function buildDigest(ctx: ExtensionContext): Promise<string> {
@@ -217,6 +280,12 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 
 		if (sub === "status") {
 			ctx.ui.notify(renderStatus(), "info");
+			return;
+		}
+
+		if (sub === "doctor") {
+			const report = renderDoctor();
+			ctx.ui.notify(report.text, report.healthy ? "info" : "warning");
 			return;
 		}
 
@@ -278,7 +347,7 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 	// --- local command surface ------------------------------------------------
 
 	pi.registerCommand(localCommand, {
-		description: "Local control for the messenger bridge (status, pair, digest, pause, resume, disconnect)",
+		description: "Local control for the messenger bridge (status, doctor, pair, digest, pause, resume, disconnect)",
 		handler: async (args, ctx) => {
 			await handleLocalCommand(args, ctx);
 		},
@@ -291,14 +360,26 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 		const loaded = await loadBridgeConfig(ctx.cwd);
 		const created = createTransports(loaded.transports, logger);
 
-		bridge = new Bridge({ host, config: loaded.config });
+		currentSessionKey = sessionKey(ctx);
+		const notes = [...loaded.notes];
+		let bridgeStore: BridgeStore;
+		try {
+			store = await FileBridgeStore.open({ path: statePath(), sessionId: currentSessionKey, logger });
+			bridgeStore = store;
+		} catch (error) {
+			store = null;
+			bridgeStore = new MemoryBridgeStore();
+			logger.error("failed to open persistent store", { error: String(error) });
+			notes.push(`could not open ${statePath()}: ${String(error)}. Pairing will not survive a restart.`);
+		}
+
+		bridge = new Bridge({ host, config: loaded.config, store: bridgeStore });
 		for (const transport of created.transports) {
 			await bridge.register(transport);
 		}
 
 		ctx.ui.setStatus(COMMAND_KEY, statusLabel());
 
-		const notes = [...loaded.notes];
 		if (created.skipped.length > 0) notes.push(`disabled transports: ${created.skipped.join(", ")}`);
 		if (notes.length > 0) ctx.ui.notify(`[${COMMAND_KEY}]\n${notes.join("\n")}`, "warning");
 	});
@@ -306,6 +387,12 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 	pi.on("session_shutdown", async () => {
 		await bridge?.stop();
 		bridge = null;
+		// Persist before the session runtime goes away, so a reload or restart
+		// does not force the user to pair again.
+		if (store) {
+			await store.flush();
+			store = null;
+		}
 		sessionCtx = null;
 		runningTool = undefined;
 		lastAssistantText = "";

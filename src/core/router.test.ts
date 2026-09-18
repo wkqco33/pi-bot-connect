@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ATTACHMENT_FALLBACK_PROMPT, normalizeIncoming, route } from "./router.js";
+import { ATTACHMENT_FALLBACK_PROMPT, normalizeIncoming, route, type RouterInput } from "./router.js";
 import { resolveConfig } from "./types.js";
 import type { Envelope } from "./types.js";
 
@@ -20,15 +20,20 @@ const CONFIG = resolveConfig({
 	remotePrefixes: ["/", "connect ", "bot "],
 });
 
-function routeEnvelope(text: string, overrides: Partial<Envelope> = {}, state: Partial<Parameters<typeof route>[0]> = {}) {
+type RouteState = Pick<RouterInput, "authenticated" | "busy" | "acceptsAttachments"> & {
+	pendingChallenge?: RouterInput["pendingChallenge"];
+};
+
+function routeEnvelope(text: string, overrides: Partial<Envelope> = {}, state: Partial<RouteState> = {}) {
 	return route({
 		envelope: envelope({ text, ...overrides }),
 		config: CONFIG,
-		authenticated: true,
-		busy: false,
+		authenticated: state.authenticated ?? true,
+		busy: state.busy ?? false,
+		acceptsAttachments: state.acceptsAttachments ?? false,
+		...(state.pendingChallenge === undefined ? {} : { pendingChallenge: state.pendingChallenge }),
 		now: 1_000,
 		random: () => 0,
-		...state,
 	});
 }
 
@@ -115,6 +120,7 @@ describe("route — commands and prompts", () => {
 			config: resolveConfig({ busyDelivery: "steer" }),
 			authenticated: true,
 			busy: true,
+			acceptsAttachments: false,
 			now: 0,
 			random: () => 0,
 		});
@@ -145,6 +151,7 @@ describe("route — addressing policy", () => {
 			config: resolveConfig({ requireAddressing: false }),
 			authenticated: true,
 			busy: false,
+			acceptsAttachments: false,
 			now: 0,
 			random: () => 0,
 		});
@@ -152,22 +159,43 @@ describe("route — addressing policy", () => {
 	});
 });
 
-describe("route — empty and attachment-only messages", () => {
+describe("route — empty messages", () => {
 	it("ignores an empty message", () => {
 		expect(routeEnvelope("   ")).toEqual([{ type: "ignore", reason: "empty" }]);
 	});
+});
 
-	it("substitutes a fallback prompt for an attachment-only message", () => {
-		const actions = routeEnvelope("", {
-			attachments: [{ kind: "image", mediaType: "image/png", ref: "file-1" }],
-		});
+describe("route — attachments", () => {
+	const image = { kind: "image", mediaType: "image/png", ref: "file-1" } as const;
+
+	it("rejects an attachment-only message when the host cannot forward it", () => {
+		expect(routeEnvelope("", { attachments: [image] })).toEqual([{ type: "unsupported", feature: "attachments" }]);
+	});
+
+	it("rejects an attachment even when it carries a caption", () => {
+		// Forwarding the caption alone would silently drop the image the user sent.
+		expect(routeEnvelope("what is this?", { attachments: [image] })).toEqual([
+			{ type: "unsupported", feature: "attachments" },
+		]);
+	});
+
+	it("substitutes a fallback prompt when forwarding is supported", () => {
+		const actions = routeEnvelope("", { attachments: [image] }, { acceptsAttachments: true });
 		expect(actions).toEqual([{ type: "prompt", text: ATTACHMENT_FALLBACK_PROMPT }]);
 	});
 
-	it("keeps the caption when an attachment has one", () => {
-		const actions = routeEnvelope("what does this error mean?", {
-			attachments: [{ kind: "image", mediaType: "image/png", ref: "file-1" }],
-		});
+	it("keeps the caption when forwarding is supported", () => {
+		const actions = routeEnvelope(
+			"what does this error mean?",
+			{ attachments: [image] },
+			{ acceptsAttachments: true },
+		);
 		expect(actions).toEqual([{ type: "prompt", text: "what does this error mean?" }]);
+	});
+
+	it("still ignores an unaddressed channel attachment", () => {
+		expect(routeEnvelope("look", { attachments: [image], isDirect: false })).toEqual([
+			{ type: "ignore", reason: "unaddressed" },
+		]);
 	});
 });

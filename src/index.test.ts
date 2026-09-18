@@ -10,7 +10,7 @@
  * for its logic, that logic belongs in the core.
  */
 
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -25,11 +25,16 @@ class FakeCtx {
 	readonly cwd: string;
 	readonly notifications: Array<{ text: string; level: string }> = [];
 	readonly statuses = new Map<string, string | undefined>();
+	readonly sessionManager: { getSessionId(): string; getSessionFile(): string | null };
 	idle = true;
 	aborts = 0;
 
-	constructor(cwd: string) {
+	constructor(cwd: string, sessionId = "session-a") {
 		this.cwd = cwd;
+		this.sessionManager = {
+			getSessionId: () => sessionId,
+			getSessionFile: () => null,
+		};
 		this.ui = {
 			notify: (text, level) => {
 				this.notifications.push({ text, level: level ?? "info" });
@@ -102,29 +107,57 @@ class FakePi {
 type PiLike = Parameters<typeof botConnect>[0];
 
 let dir: string;
+let configPath: string;
+let stateFile: string;
+/** Adapters opened by a test, shut down deterministically before cleanup. */
+const cleanups: Array<() => Promise<void>> = [];
 
 beforeEach(async () => {
 	dir = await mkdtemp(join(tmpdir(), "bot-connect-test-"));
+	configPath = join(dir, "config.json");
+	stateFile = join(dir, "state.json");
 });
 
 afterEach(async () => {
+	// Shut every adapter down first: the store persists in the background, so
+	// removing the directory mid-write races with an in-flight rename.
+	for (const cleanup of cleanups.splice(0)) {
+		await cleanup().catch(() => undefined);
+	}
 	delete process.env.PI_BOT_CONNECT_CONFIG;
+	delete process.env.PI_BOT_CONNECT_STATE;
 	await rm(dir, { recursive: true, force: true });
 });
 
-async function start(config?: unknown): Promise<{ pi: FakePi; ctx: FakeCtx }> {
-	const configPath = join(dir, "config.json");
+async function exists(target: string): Promise<boolean> {
+	try {
+		await stat(target);
+		return true;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+		throw error;
+	}
+}
+
+async function start(
+	config?: unknown,
+	options: { sessionId?: string } = {},
+): Promise<{ pi: FakePi; ctx: FakeCtx }> {
 	if (config !== undefined) {
 		const content = typeof config === "string" ? config : JSON.stringify(config);
 		await writeFile(configPath, content, "utf8");
 	}
-	// Points discovery at a temp file so the developer's real global config
-	// can never influence this test.
+	// Point discovery at temp files so neither the developer's real global config
+	// nor their real pairing state can influence this test.
 	process.env.PI_BOT_CONNECT_CONFIG = configPath;
+	process.env.PI_BOT_CONNECT_STATE = stateFile;
 
 	const pi = new FakePi();
 	await botConnect(pi as unknown as PiLike);
-	const ctx = new FakeCtx(dir);
+	const ctx = new FakeCtx(dir, options.sessionId);
+	cleanups.push(async () => {
+		await pi.emit("session_shutdown", { reason: "quit" }, ctx);
+	});
 	await pi.emit("session_start", { reason: "startup" }, ctx);
 	return { pi, ctx };
 }
@@ -233,7 +266,7 @@ describe("adapter — local command surface", () => {
 	it("lists the local subcommands", async () => {
 		const { pi, ctx } = await start();
 		await pi.run("status", ctx);
-		expect(ctx.lastNotification).toContain("status|pair|digest|pause|resume|disconnect|config");
+		expect(ctx.lastNotification).toContain("status|doctor|pair|digest|pause|resume|disconnect|config");
 	});
 
 	it("reports that no transports exist yet", async () => {
@@ -287,5 +320,72 @@ describe("adapter — local command surface", () => {
 		await pi.emit("session_shutdown", { reason: "quit" }, ctx);
 		await pi.run("status", ctx);
 		expect(ctx.lastNotification).toContain("no active session");
+	});
+});
+
+describe("adapter — doctor", () => {
+	it("reports that no transports are registered", async () => {
+		const { pi, ctx } = await start();
+		await pi.run("doctor", ctx);
+		expect(ctx.lastNotification).toContain("- transports: none registered");
+	});
+
+	it("reports the session key and the state file", async () => {
+		const { pi, ctx } = await start(undefined, { sessionId: "session-xyz" });
+		await pi.run("doctor", ctx);
+		expect(ctx.lastNotification).toContain("- session key: session-xyz");
+		expect(ctx.lastNotification).toContain(stateFile);
+		expect(ctx.lastNotification).toContain("(persistent)");
+	});
+
+	it("is informational when nothing is broken", async () => {
+		const { pi, ctx } = await start();
+		await pi.run("doctor", ctx);
+		expect(ctx.notifications.at(-1)?.level).toBe("info");
+	});
+
+	it("tells the user what to check when a transport is down", async () => {
+		const { pi, ctx } = await start();
+		await pi.run("doctor", ctx);
+		expect(ctx.lastNotification).toContain("privileged intents");
+		expect(ctx.lastNotification).toContain("no other pi process");
+	});
+});
+
+describe("adapter — pairing survives a restart", () => {
+	function stateWith(sessionId: string): string {
+		return JSON.stringify({
+			version: 1,
+			sessions: {
+				[sessionId]: {
+					updatedAt: 1,
+					trusted: { "discord:42": 1 },
+					pending: {},
+					paused: [],
+					conversations: [{ transport: "discord", conversationId: "chan-1" }],
+				},
+			},
+		});
+	}
+
+	it("loads pairing state written by a previous run of the same session", async () => {
+		await writeFile(stateFile, stateWith("session-same"), "utf8");
+		const { pi, ctx } = await start(undefined, { sessionId: "session-same" });
+		await pi.run("status", ctx);
+		expect(ctx.lastNotification).toContain("- paired chats: 1");
+		expect(ctx.lastNotification).toContain("- conversations: 1");
+	});
+
+	it("does not inherit pairing state from a different session", async () => {
+		await writeFile(stateFile, stateWith("other-session"), "utf8");
+		const { pi, ctx } = await start(undefined, { sessionId: "session-same" });
+		await pi.run("status", ctx);
+		expect(ctx.lastNotification).toContain("- paired chats: 0");
+	});
+
+	it("flushes state to disk on shutdown", async () => {
+		const { pi, ctx } = await start();
+		await pi.emit("session_shutdown", { reason: "reload" }, ctx);
+		expect(await exists(stateFile)).toBe(true);
 	});
 });
