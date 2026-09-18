@@ -472,7 +472,16 @@ release 워크플로의 첫 job이 **태그와 `package.json` version이 다르�
 | 워크플로 | 트리거 | 하는 일 |
 | --- | --- | --- |
 | `ci.yml` | `master`·`main` push, PR | Node 22.19와 24에서 `npm run check`, 그리고 `npm run pack:verify` |
-| `release.yml` | `v*` 태그 push | 태그↔version↔`private` 검증 → `npm run check` → `pack:verify` → `npm publish --provenance --access public` → GitHub Release 생성 |
+| `release.yml` | `v*` 태그 push | 태그↔version↔`private` 검증 → `npm run check` → `pack:verify` → 레지스트리에 이미 있는지 확인 → (없으면) `npm publish --provenance` → GitHub Release |
+
+`release.yml`은 **멱등하다.** 이미 npm에 있는 버전을 태그하면 발행을 건너뜀고
+GitHub Release만 만든다. 이미 발행된 버전은 재발행이 거부되고 provenance도 다시 쓸 수 없다.
+(그래서 손으로 발행한 버전에 나중에 태그를 붙이는 것이 안전하다.) GitHub Release 생성은
+이미 있으면 건너뛴다.
+
+**provenance는 CI 발행에만 붙는다.** 로컬 `npm publish`는 레지스트리 서명만 생긴다.
+서명된 출처가 필요하면 발행 전에 워크플로가 통과되어야 한다 — `npm audit signatures`로
+설치 트리를 감사할 수 있다.
 
 **기본 브랜치는 `master`다.** `main`도 함께 트리거에 넣어 둔 건 이름을 바꿀 때 CI가 조용히 꺼지지 않게 하기 위함이다.
 
@@ -495,7 +504,9 @@ release 워크플로의 첫 job이 **태그와 `package.json` version이 다르�
 ### 발행 전 체크리스트
 
 - [ ] `npm run pack:verify`가 통과한다 (필수 파일 존재 + 개발 전용 파일 부재 + `pi` 매니페스트 경로 유효성)
-- [ ] tarball을 실제로 설치해 로드되는지 확인했다: `npm pack` → 임시 디렉터리에서 `npm i <tgz>` → `pi install ./node_modules/pi-bot-connect -l` → `pi --list-models --offline`이 0으로 끝난다
+- [ ] 발행한 뒤 **레지스트리에서 받은 tarball을 로컬 검증본과 대조**했다. `npm pack <name>@<version>`으로 받아 파일 목록을 비교한다
+- [ ] tarball을 실제로 설치해 로드되는지 확인했다: `npm run pack` → 임시 디렉터리에서 `pi install npm:<name>@<version> -l` → `pi --list-models --offline`이 0으로 끝난다
+- [ ] 발행 후 `git tag -a v<version> -m v<version>` 으로 **같은 버전에 태그를 붙였다** (GitHub Release가 생기고, 다음 릴리스의 기준점이 된다)
 - [ ] `git ls-files | grep -iE 'token|secret|\.env'`가 **가짜 테스트 fixture 외에는** 비어 있다
 - [ ] CHANGELOG에 `Added`/`Changed`/`Fixed`/`Security` 중 해당 항목이 있다
 - [ ] README의 “지원 범위”가 실제 `engines`·peer 범위와 일치한다

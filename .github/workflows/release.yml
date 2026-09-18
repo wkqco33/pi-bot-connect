@@ -75,7 +75,24 @@ jobs:
       # defence before an immutable artifact leaves the building.
       - run: npm run check
       - run: npm run pack:verify
+      - name: Is this version already on the registry?
+        id: registry
+        run: |
+          set -euo pipefail
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          if npm view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "${name}@${version} is already published"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            echo "${name}@${version} is not published yet"
+          fi
+      # Tagging an already-published version is legitimate (it gives the version
+      # a tag and a release page). Re-publishing it is not: npm rejects it, and
+      # provenance cannot be rewritten. So skip the publish instead of failing.
       - name: Configure npm authentication
+        if: steps.registry.outputs.published == 'false'
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
@@ -89,8 +106,19 @@ jobs:
             npm install --global npm@^11.5.1
           fi
       - name: Publish to npm
+        if: steps.registry.outputs.published == 'false'
         run: npm publish --provenance --access public
+      - name: Explain the skipped publish
+        if: steps.registry.outputs.published == 'true'
+        run: |
+          echo "::notice title=Already published::This version was published outside CI, so it carries a registry signature but no provenance attestation. Nothing was re-published. Bump the version and tag again to get provenance."
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" --generate-notes
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "release ${GITHUB_REF_NAME} already exists"
+          else
+            gh release create "${GITHUB_REF_NAME}" --generate-notes
+          fi
