@@ -12,7 +12,13 @@ export default {
 		coverage: {
 			provider: "v8",
 			include: ["src/**/*.ts"],
-			exclude: ["src/**/*.test.ts", "src/index.ts", "src/transports/index.ts"],
+			exclude: [
+				"src/**/*.test.ts",
+				"src/index.ts",
+				"src/transports/index.ts",
+				// Shared test doubles, not product code.
+				"src/**/doubles.ts",
+			],
 		},
 	},
 };

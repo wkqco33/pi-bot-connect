@@ -269,10 +269,11 @@ describe("adapter — local command surface", () => {
 		expect(ctx.lastNotification).toContain("status|doctor|pair|digest|pause|resume|disconnect|config");
 	});
 
-	it("reports that no transports exist yet", async () => {
+	it("points at the available transports when none is configured", async () => {
 		const { pi, ctx } = await start();
 		await pi.run("status", ctx);
-		expect(ctx.lastNotification).toContain("No transports are implemented yet");
+		expect(ctx.lastNotification).toContain("- transports: (none configured)");
+		expect(ctx.lastNotification).toContain("Available transports: discord");
 	});
 
 	it("explains how to obtain a pairing code when none is pending", async () => {

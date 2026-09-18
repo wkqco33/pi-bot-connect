@@ -14,8 +14,21 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+	// Persistence is write-behind, so a pending rename would race the rmdir.
+	for (const store of opened.splice(0)) {
+		await store.flush();
+	}
 	await rm(dir, { recursive: true, force: true });
 });
+
+/** Stores opened by a test. Flushed before cleanup: writes are write-behind. */
+const opened: FileBridgeStore[] = [];
+
+async function open(options: Parameters<typeof FileBridgeStore.open>[0]): Promise<FileBridgeStore> {
+	const store = await FileBridgeStore.open(options);
+	opened.push(store);
+	return store;
+}
 
 async function readState(target: string): Promise<Record<string, unknown>> {
 	let raw: string;
@@ -117,36 +130,36 @@ describe("parseStoreSnapshot", () => {
 
 describe("FileBridgeStore — durability", () => {
 	it("writes the state file with owner-only permissions", async () => {
-		const store = await FileBridgeStore.open({ path, sessionId: "s1" });
+		const store = await open({ path, sessionId: "s1" });
 		await store.flush();
 		expect((await stat(path)).mode & 0o777).toBe(0o600);
 	});
 
 	it("leaves no temporary file behind", async () => {
-		const store = await FileBridgeStore.open({ path, sessionId: "s1" });
+		const store = await open({ path, sessionId: "s1" });
 		store.trust("discord:42", 1);
 		await store.flush();
 		expect((await readdir(dirname(path))).filter((entry) => entry.includes(".tmp-"))).toEqual([]);
 	});
 
 	it("survives a restart: a new instance on the same session sees the pairing", async () => {
-		const first = await FileBridgeStore.open({ path, sessionId: "s1" });
+		const first = await open({ path, sessionId: "s1" });
 		first.trust("discord:42", 1000);
 		await first.flush();
 
-		const second = await FileBridgeStore.open({ path, sessionId: "s1" });
+		const second = await open({ path, sessionId: "s1" });
 		expect(second.isTrusted("discord:42")).toBe(true);
 		expect(second.pairedAt("discord:42")).toBe(1000);
 	});
 
 	it("survives a restart: pending challenges and broadcast targets are kept", async () => {
-		const first = await FileBridgeStore.open({ path, sessionId: "s1" });
+		const first = await open({ path, sessionId: "s1" });
 		first.setPending("discord:c1", { code: "123456", expiresAt: 9, attempts: 1 });
 		first.rememberConversation({ transport: "discord", conversationId: "c1", threadId: "t1" });
 		first.setPaused("discord:c1", true);
 		await first.flush();
 
-		const second = await FileBridgeStore.open({ path, sessionId: "s1" });
+		const second = await open({ path, sessionId: "s1" });
 		expect(second.getPending("discord:c1")).toEqual({ code: "123456", expiresAt: 9, attempts: 1 });
 		expect(second.listPending()).toHaveLength(1);
 		expect(second.listConversations()).toEqual([{ transport: "discord", conversationId: "c1", threadId: "t1" }]);
@@ -154,7 +167,7 @@ describe("FileBridgeStore — durability", () => {
 	});
 
 	it("writes a versioned file", async () => {
-		const store = await FileBridgeStore.open({ path, sessionId: "s1" });
+		const store = await open({ path, sessionId: "s1" });
 		await store.flush();
 		expect((await readState(path)).version).toBe(STORE_VERSION);
 	});
@@ -162,7 +175,7 @@ describe("FileBridgeStore — durability", () => {
 	it("starts empty and warns when the file is not valid JSON", async () => {
 		await writeFile(path, "{ not json", "utf8");
 		const sink = new MemoryLogSink();
-		const store = await FileBridgeStore.open({
+		const store = await open({
 			path,
 			sessionId: "s1",
 			logger: createLogger("test", sink, "debug"),
@@ -172,7 +185,7 @@ describe("FileBridgeStore — durability", () => {
 	});
 
 	it("flush resolves when there is nothing to write", async () => {
-		const store = await FileBridgeStore.open({ path, sessionId: "s1" });
+		const store = await open({ path, sessionId: "s1" });
 		await store.flush();
 		await store.flush();
 		expect(store.listTrusted()).toEqual([]);
@@ -181,28 +194,28 @@ describe("FileBridgeStore — durability", () => {
 
 describe("FileBridgeStore — session isolation", () => {
 	it("does not leak trust, targets or pause state between sessions", async () => {
-		const first = await FileBridgeStore.open({ path, sessionId: "session-a" });
+		const first = await open({ path, sessionId: "session-a" });
 		first.trust("discord:42", 1);
 		first.rememberConversation({ transport: "discord", conversationId: "c1" });
 		first.setPaused("discord:c1", true);
 		await first.flush();
 
-		const second = await FileBridgeStore.open({ path, sessionId: "session-b" });
+		const second = await open({ path, sessionId: "session-b" });
 		expect(second.isTrusted("discord:42")).toBe(false);
 		expect(second.listConversations()).toEqual([]);
 		expect(second.isPaused("discord:c1")).toBe(false);
 	});
 
 	it("keeps the other session's data intact when one writes", async () => {
-		const first = await FileBridgeStore.open({ path, sessionId: "session-a" });
+		const first = await open({ path, sessionId: "session-a" });
 		first.trust("discord:42", 1);
 		await first.flush();
 
-		const second = await FileBridgeStore.open({ path, sessionId: "session-b" });
+		const second = await open({ path, sessionId: "session-b" });
 		second.setPaused("discord:c2", true);
 		await second.flush();
 
-		const reopened = await FileBridgeStore.open({ path, sessionId: "session-a" });
+		const reopened = await open({ path, sessionId: "session-a" });
 		expect(reopened.isTrusted("discord:42")).toBe(true);
 	});
 
@@ -210,7 +223,7 @@ describe("FileBridgeStore — session isolation", () => {
 		let clock = 0;
 		const now = () => ++clock;
 		for (const sessionId of ["s1", "s2", "s3"]) {
-			const store = await FileBridgeStore.open({ path, sessionId, maxSessions: 2, now });
+			const store = await open({ path, sessionId, maxSessions: 2, now });
 			store.trust(`${sessionId}:u`, clock);
 			await store.flush();
 		}
@@ -222,7 +235,7 @@ describe("FileBridgeStore — session isolation", () => {
 
 describe("FileBridgeStore — BridgeStore behaviour", () => {
 	it("tracks trust and revocation", async () => {
-		const store = await FileBridgeStore.open({ path, sessionId: "s1" });
+		const store = await open({ path, sessionId: "s1" });
 		expect(store.isTrusted("discord:42")).toBe(false);
 		store.trust("discord:42", 5);
 		expect(store.listTrusted()).toEqual(["discord:42"]);
@@ -232,7 +245,7 @@ describe("FileBridgeStore — BridgeStore behaviour", () => {
 	});
 
 	it("clears a pending challenge", async () => {
-		const store = await FileBridgeStore.open({ path, sessionId: "s1" });
+		const store = await open({ path, sessionId: "s1" });
 		store.setPending("discord:c1", { code: "1", expiresAt: 2, attempts: 0 });
 		store.setPending("discord:c1", undefined);
 		expect(store.getPending("discord:c1")).toBeUndefined();
@@ -240,7 +253,7 @@ describe("FileBridgeStore — BridgeStore behaviour", () => {
 	});
 
 	it("deduplicates remembered conversations but keeps distinct threads", async () => {
-		const store = await FileBridgeStore.open({ path, sessionId: "s1" });
+		const store = await open({ path, sessionId: "s1" });
 		store.rememberConversation({ transport: "discord", conversationId: "c1" });
 		store.rememberConversation({ transport: "discord", conversationId: "c1" });
 		store.rememberConversation({ transport: "discord", conversationId: "c1", threadId: "t1" });
@@ -248,7 +261,7 @@ describe("FileBridgeStore — BridgeStore behaviour", () => {
 	});
 
 	it("unpauses a conversation", async () => {
-		const store = await FileBridgeStore.open({ path, sessionId: "s1" });
+		const store = await open({ path, sessionId: "s1" });
 		store.setPaused("discord:c1", true);
 		store.setPaused("discord:c1", false);
 		expect(store.isPaused("discord:c1")).toBe(false);

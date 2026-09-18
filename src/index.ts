@@ -13,7 +13,7 @@
 
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { CONFIG_DIR_NAME, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Bridge, MemoryBridgeStore, type BridgeHost, type BridgeStore } from "./bridge.js";
 import { parseConfigFile } from "./config.js";
@@ -114,11 +114,26 @@ async function loadBridgeConfig(cwd: string): Promise<LoadedConfig> {
 	return { config: resolveConfig(merged), transports, notes };
 }
 
+/**
+ * Directory for durable bridge state and lock files.
+ * `PI_BOT_CONNECT_STATE` overrides the state file location (used by tests).
+ */
+function stateDir(): string {
+	const override = process.env.PI_BOT_CONNECT_STATE;
+	if (override !== undefined && override.length > 0 && dirname(override) !== ".") return dirname(override);
+	return join(homedir(), CONFIG_DIR_NAME, "agent");
+}
+
 /** Durable bridge state (trust, pending codes, broadcast targets). */
 function statePath(): string {
 	const override = process.env.PI_BOT_CONNECT_STATE;
 	if (override !== undefined && override.length > 0) return override;
-	return join(homedir(), CONFIG_DIR_NAME, "agent", `${COMMAND_KEY}-state.json`);
+	return join(stateDir(), `${COMMAND_KEY}-state.json`);
+}
+
+/** Lock files live next to the state file; one per bot credential. */
+function lockDir(): string {
+	return join(stateDir(), "locks");
 }
 
 /**
@@ -217,8 +232,9 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 			`- pending codes: ${snapshot.pending.length}`,
 		];
 		const factories = listTransportFactories();
-		if (factories.length === 0) {
-			lines.push("", "No transports are implemented yet. See docs/architecture.md.");
+		if (snapshot.transports.length === 0 && factories.length > 0) {
+			const available = factories.map((factory) => factory.id).join(", ");
+			lines.push("", `Available transports: ${available}. Configure one under "transports" in the config file.`);
 		}
 		lines.push("", `Local commands: /${localCommand} status|doctor|pair|digest|pause|resume|disconnect|config`);
 		return lines.join("\n");
@@ -358,10 +374,14 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 	pi.on("session_start", async (_event, ctx) => {
 		sessionCtx = ctx;
 		const loaded = await loadBridgeConfig(ctx.cwd);
-		const created = createTransports(loaded.transports, logger);
+		const created = createTransports({
+			transportConfig: loaded.transports,
+			lockDir: lockDir(),
+			logger,
+		});
 
 		currentSessionKey = sessionKey(ctx);
-		const notes = [...loaded.notes];
+		const notes = [...loaded.notes, ...created.errors];
 		let bridgeStore: BridgeStore;
 		try {
 			store = await FileBridgeStore.open({ path: statePath(), sessionId: currentSessionKey, logger });

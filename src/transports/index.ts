@@ -1,27 +1,29 @@
 /**
  * Transport registry.
  *
- * Adding a messenger = adding one file here that implements `Transport`.
- * Nothing else in the codebase changes, and the new adapter gets the same
- * routing, pairing, redaction, chunking and digest behaviour for free.
+ * Adding a messenger = adding a factory here that returns a `Transport`.
+ * Nothing else in the codebase changes, and the new adapter inherits routing,
+ * pairing, redaction, chunking and digest behaviour for free.
  *
  * Roadmap (see docs/architecture.md for the acceptance checklist per transport):
- *   - telegram.ts  long polling, 4096 chars, HTML flavor
- *   - discord.ts   gateway or REST polling, 2000 chars, markdown flavor
- *   - slack.ts     Socket Mode, 4000 chars, mrkdwn flavor
+ *   - telegram  long polling, 4096 bytes, HTML flavor
+ *   - slack     Socket Mode, 4000 chars, mrkdwn flavor
  *
  * Each transport must:
  *   1. never emit an `Envelope` field that is not in the contract
  *   2. set `isDirect` correctly (DMs vs channels) — addressing depends on it
  *   3. read credentials from environment variables, never from the config file
- *   4. pass `src/transports/transport-contract.test.ts` (see docs)
+ *   4. pass the conformance checklist in docs/architecture.md §5
  */
 
-import type { Transport } from "../core/types.js";
+import type { Logger, Transport } from "../core/types.js";
+import { DiscordTransport } from "./discord/index.js";
 
 export interface TransportFactoryContext {
 	readonly transportConfig: Readonly<Record<string, unknown>>;
-	readonly logger: import("../core/types.js").Logger;
+	/** Directory for single-instance lock files. Never contains credentials. */
+	readonly lockDir: string;
+	readonly logger: Logger;
 }
 
 export interface TransportFactory {
@@ -30,33 +32,85 @@ export interface TransportFactory {
 	create(context: TransportFactoryContext): Transport | null;
 }
 
-/**
- * Factories registered at load time. Empty until real transports land, which
- * is why the extension loads cleanly with no credentials configured.
- */
-const FACTORIES: readonly TransportFactory[] = [];
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readString(source: Readonly<Record<string, unknown>>, key: string): string | undefined {
+	const value = source[key];
+	return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+const discordFactory: TransportFactory = {
+	id: "discord",
+	create(context) {
+		const raw = context.transportConfig.discord;
+		const config = isRecord(raw) ? raw : {};
+		const explicitlyEnabled = config.enabled === true;
+		const tokenEnv = readString(config, "tokenEnv") ?? "PI_DISCORD_TOKEN";
+		const token = process.env[tokenEnv];
+
+		if (token === undefined || token.length === 0) {
+			// Auto-detected transports stay quiet; an explicitly enabled one that
+			// cannot possibly work is a configuration error worth surfacing.
+			if (explicitlyEnabled) {
+				throw new Error(
+					`Discord is enabled but $${tokenEnv} is not set. Export the bot token in the environment; never put it in the config file.`,
+				);
+			}
+			return null;
+		}
+
+		const lockStaleMs = typeof config.lockStaleMs === "number" ? config.lockStaleMs : undefined;
+		return new DiscordTransport({
+			token,
+			lockDir: context.lockDir,
+			logger: context.logger,
+			...(lockStaleMs === undefined ? {} : { lockStaleMs }),
+		});
+	},
+};
+
+const FACTORIES: readonly TransportFactory[] = [discordFactory];
 
 export function listTransportFactories(): readonly TransportFactory[] {
 	return FACTORIES;
 }
 
-export function createTransports(
-	transportsConfig: Readonly<Record<string, unknown>>,
-	logger: import("../core/types.js").Logger,
-): { transports: Transport[]; skipped: string[] } {
-	const created: Transport[] = [];
+export interface CreateTransportsOptions {
+	readonly transportConfig: Readonly<Record<string, unknown>>;
+	readonly lockDir: string;
+	readonly logger: Logger;
+}
+
+export interface CreatedTransports {
+	readonly transports: Transport[];
+	readonly skipped: string[];
+	/** Configuration problems, surfaced to the user instead of thrown. */
+	readonly errors: string[];
+}
+
+export function createTransports(options: CreateTransportsOptions): CreatedTransports {
+	const transports: Transport[] = [];
 	const skipped: string[] = [];
+	const errors: string[] = [];
+	const { transportConfig, lockDir, logger } = options;
 
 	for (const factory of FACTORIES) {
 		// An entry may be disabled explicitly with `{ enabled: false }`.
-		const entry = transportsConfig[factory.id];
-		if (entry && typeof entry === "object" && "enabled" in entry && entry.enabled === false) {
+		const entry = transportConfig[factory.id];
+		if (isRecord(entry) && entry.enabled === false) {
 			skipped.push(factory.id);
 			continue;
 		}
-		const transport = factory.create({ transportConfig: transportsConfig, logger });
-		if (transport) created.push(transport);
+
+		try {
+			const transport = factory.create({ transportConfig, lockDir, logger });
+			if (transport) transports.push(transport);
+		} catch (error) {
+			errors.push(error instanceof Error ? error.message : String(error));
+		}
 	}
 
-	return { transports: created, skipped };
+	return { transports, skipped, errors };
 }
