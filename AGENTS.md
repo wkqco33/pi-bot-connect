@@ -179,14 +179,24 @@ src/
         ├── index.ts         전송 본체: 신원 확인 → 락 → 게이트웨이
         ├── index.test.ts
         └── doubles.ts       공유 테스트 더블 (coverage 제외)
-    └── telegram/
+    ├── telegram/
         ├── normalize.ts     ★ 순수. Telegram update → Envelope (+ 커맨드 멘션 정규화)
         ├── normalize.test.ts
         ├── rest.ts          Bot API + 롱폴링 요청 + 레이트리밋/5xx 재시도
         ├── index.ts         전송 본체: getMe → 락 → 롱폴링 루프
         ├── index.test.ts
         └── doubles.ts       공유 테스트 더블 (coverage 제외)
+    └── robo_claw/
+        ├── proto/
+            └── messenger.proto  gRPC RoboMessenger 스키마
+        ├── normalize.ts     ★ 순수. ChatMessage ↔ Envelope
+        ├── normalize.test.ts
+        ├── server.ts        gRPC 서버 추상화 + DefaultGrpcServerAdapter
+        ├── index.ts         전송 본체: 포트 락 → gRPC 서버 바인딩 → ChatStream
+        ├── index.test.ts
+        └── doubles.ts       공유 테스트 더블 (coverage 제외)
 ```
+
 
 **Discord 전송이 참조 구현이다.** 새 전송을 추가할 때 구조를 그대로 따라라: 순수 정규화 모듈 + 주입 가능한 I/O + 얇은 조합.
 

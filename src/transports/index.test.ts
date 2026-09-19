@@ -6,16 +6,19 @@ const TOKEN_ENV = "PI_DISCORD_TOKEN";
 const CUSTOM_ENV = "PI_BOT_CONNECT_TEST_DISCORD_TOKEN";
 const TELEGRAM_ENV = "PI_TELEGRAM_TOKEN";
 const TELEGRAM_CUSTOM_ENV = "PI_BOT_CONNECT_TEST_TELEGRAM_TOKEN";
+const ROBO_CLAW_TOKEN_ENV = "PI_ROBO_CLAW_TOKEN";
 const originalToken = process.env[TOKEN_ENV];
 const originalCustom = process.env[CUSTOM_ENV];
 const originalTelegram = process.env[TELEGRAM_ENV];
 const originalTelegramCustom = process.env[TELEGRAM_CUSTOM_ENV];
+const originalRoboClawToken = process.env[ROBO_CLAW_TOKEN_ENV];
 
 beforeEach(() => {
 	delete process.env[TOKEN_ENV];
 	delete process.env[CUSTOM_ENV];
 	delete process.env[TELEGRAM_ENV];
 	delete process.env[TELEGRAM_CUSTOM_ENV];
+	delete process.env[ROBO_CLAW_TOKEN_ENV];
 });
 
 afterEach(() => {
@@ -23,6 +26,7 @@ afterEach(() => {
 	restore(CUSTOM_ENV, originalCustom);
 	restore(TELEGRAM_ENV, originalTelegram);
 	restore(TELEGRAM_CUSTOM_ENV, originalTelegramCustom);
+	restore(ROBO_CLAW_TOKEN_ENV, originalRoboClawToken);
 });
 
 function restore(name: string, value: string | undefined): void {
@@ -36,8 +40,9 @@ function create(transportConfig: Record<string, unknown>) {
 
 describe("transport registry", () => {
 	it("registers the built-in factories", () => {
-		expect(listTransportFactories().map((factory) => factory.id)).toEqual(["discord", "telegram"]);
+		expect(listTransportFactories().map((factory) => factory.id)).toEqual(["discord", "telegram", "robo_claw"]);
 	});
+
 
 	it("creates nothing when no credential is present", () => {
 		expect(create({})).toEqual({ transports: [], skipped: [], errors: [] });
@@ -96,4 +101,25 @@ describe("transport registry", () => {
 		expect(created.transports.map((transport) => transport.id)).toEqual(["discord"]);
 		expect(created.errors).toEqual([]);
 	});
+
+	it("creates a RoboClaw transport when explicitly enabled", () => {
+		const created = create({ robo_claw: { enabled: true } });
+		expect(created.transports.map((transport) => transport.id)).toEqual(["robo_claw"]);
+		expect(created.errors).toEqual([]);
+	});
+
+	it("creates a RoboClaw transport when PI_ROBO_CLAW_TOKEN is present", () => {
+		process.env[ROBO_CLAW_TOKEN_ENV] = "secret";
+		const created = create({});
+		expect(created.transports.map((transport) => transport.id)).toEqual(["robo_claw"]);
+		expect(created.errors).toEqual([]);
+	});
+
+	it("skips RoboClaw when explicitly disabled", () => {
+		process.env[ROBO_CLAW_TOKEN_ENV] = "secret";
+		const created = create({ robo_claw: { enabled: false } });
+		expect(created.transports).toEqual([]);
+		expect(created.skipped).toEqual(["robo_claw"]);
+	});
 });
+

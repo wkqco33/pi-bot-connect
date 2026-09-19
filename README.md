@@ -1,6 +1,6 @@
 # pi-bot-connect
 
-**pi 코딩 에이전트의 라이브 세션을 Discord·Telegram에 연결하는 pi 확장.** (Slack은 같은 코어 위에 추가 예정)
+**pi 코딩 에이전트의 라이브 세션을 Discord·Telegram 및 사내망 메신저(RoboClaw gRPC)에 연결하는 pi 확장.** (Slack은 같은 코어 위에 추가 예정)
 
 알림 봇이 아니다. **핸드오프 브리지**다.
 
@@ -8,7 +8,7 @@
 - 메신저에서 **다음 작업을 이어간다** — 원격 메시지가 같은 라이브 세션에 주입된다
 - 터미널로 돌아오면 그 작업이 **이미 세션에 반영되어 있다** — 세션을 뺏지 않는다
 
-> 상태: **Discord·Telegram 사용 가능**. 코어·브리지·영속화·락·Discord 게이트웨이·이미지 전달·진행 카드·작업 다이제스트가 663개 테스트로 고정되어 있다. 봇 SDK(`discord.js` 등) 없이 구현했다.
+> 상태: **Discord·Telegram·RoboClaw(gRPC) 사용 가능**. 코어·브리지·영속화·락·Discord 게이트웨이·gRPC 서버·이미지 전달·진행 카드·작업 다이제스트가 테스트로 고정되어 있다. 봇 SDK(`discord.js` 등) 없이 구현했다.
 
 ---
 
@@ -26,14 +26,14 @@ pi install git:github.com/wkqco33/pi-bot-connect@v0.1.0
 pi -e ./src/index.ts          # 현재 디렉터리의 소스로 한 번만 실행
 ```
 
-설치 후 pi를 재시작하거나 `/reload`를 실행한 뒤, 아래 Discord 설정을 진행한다.
+설치 후 pi를 재시작하거나 `/reload`를 실행한 뒤, 아래 설정을 진행한다.
 
 > **0.x 버전이다.** 설정 스키마·원격 명령 집합·`Transport` 계약이 메이저 버전 없이
 > 바뀔 수 있다. 변경 내역은 [CHANGELOG.md](CHANGELOG.md).
 >
 > **실제 Discord API 왕복은 0.3.0에서 검증되었다** (텍스트·이미지 프롬프트, 진행 카드,
 > 긴 답변 분할). 게이트웨이 상태머신·정규화·첨부 다운로드·락은 전부 가짜 소켓과 가짜
-> fetch로 테스트되어 있고(663개), 실사용 중 문제가 생기면 `/connect doctor`가 어느 단계인지 알려준다.
+> fetch로 테스트되어 있고, 실사용 중 문제가 생기면 `/connect doctor`가 어느 단계인지 알려준다.
 
 ---
 
@@ -43,7 +43,8 @@ pi -e ./src/index.ts          # 현재 디렉터리의 소스로 한 번만 실�
 | --- | --- |
 | pi | `>=0.85.0` (peer dependency) |
 | Node.js | `>=22.19.0` — pi의 요구사항이며 전역 `WebSocket`/`fetch`를 쓴다 |
-| 전송 | Discord, Telegram. Slack은 같은 코어 위에 추가 예정 |
+| 전송 | Discord, Telegram, RoboClaw (gRPC 사내망). Slack은 같은 코어 위에 추가 예정 |
+
 | 모델 입력 | 텍스트 + 이미지 (PNG/JPEG/GIF/WebP, 최대 4장, 장당 8 MiB) |
 | 이미지가 아닌 첨부 | 거부한다 (조용히 버리지 않음) |
 | 다중 세션 | 세션당 1전송. 단일 봇 + 다중 세션 라우팅은 미구현 |
@@ -186,6 +187,53 @@ export PI_TELEGRAM_TOKEN="123456:ABC-your-token"
 3. 이후 메시지가 같은 pi 세션의 프롬프트가 된다
 
 Telegram은 롱폴링을 쓴다. 같은 봇 토큰으로 두 프로세스가 폴링하면 Telegram이 409를 반환하므로, Discord와 동일하게 **단일 인스턴스 락**이 적용된다.
+
+---
+
+## 사내망 메신저 (RoboClaw gRPC) 설정
+
+사외 인터넷 메신저(Discord/Telegram)를 사용할 수 없는 폐쇄망/사내망 환경에서는 사내 Flutter 메신저 앱인 **RoboClaw Talk**(`robo_claw_talk`)과 gRPC 양방향 스트리밍(`ChatStream`)으로 통신할 수 있다.
+
+### 1. 설정 파일
+
+`<project>/.pi/bot-connect.json`:
+
+```json
+{
+  "transports": {
+    "robo_claw": {
+      "enabled": true,
+      "port": 50052,
+      "host": "0.0.0.0",
+      "tokenEnv": "PI_ROBO_CLAW_TOKEN"
+    }
+  }
+}
+```
+
+- `port`: gRPC 서버 바인딩 포트 (기본값: `50052`)
+- `host`: 바인딩 호스트 (기본값: `0.0.0.0`, 로컬 전용은 `127.0.0.1`)
+- `tokenEnv`: 피어 인증 토큰 환경변수 (기본값: `PI_ROBO_CLAW_TOKEN`). 사내망 무단 접속을 차단하려면 환경변수에 토큰을 설정한다. 토큰 미설정 시 Insecure로 동작한다.
+
+### 2. 환경변수 (선택)
+
+```bash
+export PI_ROBO_CLAW_TOKEN="your-peer-token"
+```
+
+### 3. 클라이언트 앱(RoboClaw Talk)에서 채널 연결
+
+1. `robo_claw_talk` 앱을 실행하고 채널 추가(+)를 누른다.
+2. 채널 정보 입력:
+   - **이름**: `My Pi Agent`
+   - **호스트**: `127.0.0.1` (동일 PC) 또는 PC의 사내 IP (모바일/타 PC)
+   - **포트**: `50052`
+   - **토큰**: `PI_ROBO_CLAW_TOKEN`에 지정한 값 (설정한 경우)
+3. 채팅방에 접속하여 아무 메시지나 보낸다.
+4. **터미널에 6자리 코드가 뜬다** → 채팅창에 6자리 입력
+5. 세션 페어링이 완료되며, 메신저에서 실시간으로 pi 코딩 에이전트와 대화하고 작업을 이어갈 수 있다!
+
+동일 포트를 여러 세션이 점유하지 않도록 **포트 단위 단일 인스턴스 락**이 적용된다.
 
 ## 로컬 명령
 

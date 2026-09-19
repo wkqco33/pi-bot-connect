@@ -10,6 +10,7 @@
 import type { Logger, Transport } from "../core/types.js";
 import { DiscordTransport } from "./discord/index.js";
 import { TelegramTransport } from "./telegram/index.js";
+import { RoboClawTransport } from "./robo_claw/index.js";
 
 export interface TransportFactoryContext {
 	readonly transportConfig: Readonly<Record<string, unknown>>;
@@ -91,7 +92,41 @@ const telegramFactory: TransportFactory = {
 	},
 };
 
-const FACTORIES: readonly TransportFactory[] = [discordFactory, telegramFactory];
+const roboClawFactory: TransportFactory = {
+	id: "robo_claw",
+	create(context) {
+		const raw = context.transportConfig.robo_claw;
+		const config = isRecord(raw) ? raw : {};
+		const explicitlyEnabled = config.enabled === true;
+		const tokenEnv = readString(config, "tokenEnv") ?? "PI_ROBO_CLAW_TOKEN";
+		const token = process.env[tokenEnv];
+
+		const autoDetected =
+			(token !== undefined && token.length > 0) ||
+			process.env.PI_ROBO_CLAW_ENABLED === "1" ||
+			process.env.PI_ROBO_CLAW_ENABLED === "true";
+
+		if (!explicitlyEnabled && !autoDetected) {
+			return null;
+		}
+
+		const port = typeof config.port === "number" ? config.port : undefined;
+		const host = readString(config, "host");
+		const lockStaleMs = typeof config.lockStaleMs === "number" ? config.lockStaleMs : undefined;
+
+		return new RoboClawTransport({
+			lockDir: context.lockDir,
+			logger: context.logger,
+			...(port !== undefined ? { port } : {}),
+			...(host !== undefined ? { host } : {}),
+			...(token !== undefined ? { token } : {}),
+			...(lockStaleMs !== undefined ? { lockStaleMs } : {}),
+		});
+	},
+};
+
+const FACTORIES: readonly TransportFactory[] = [discordFactory, telegramFactory, roboClawFactory];
+
 
 export function listTransportFactories(): readonly TransportFactory[] {
 	return FACTORIES;

@@ -15,7 +15,19 @@
 - 단일 봇 + 다중 세션 브로커 (G3) — 세션↔대화 바인딩 정책 결정 필요
 - 원격 턴을 로컬 TUI에 남기는 맥락 병합 (G2)
 
+## [0.6.0] - 2026-09-19
+
+### Added
+
+- **RoboClaw gRPC 사내망 전송 어댑터 (`robo_claw`)** — 외부망이 차단된 사내망 환경에서 사내 Flutter 메신저 앱인 `robo_claw_talk`와 gRPC 양방향 스트리밍(`ChatStream`)으로 통신할 수 있는 gRPC 서버를 호스팅한다
+- `proto/messenger.proto` 스키마 연동 및 순수 정규화(`ChatMessage` ↔ `Envelope`) 계층
+- 다중 인스턴스 포트 락 (`robo_claw-<port>.lock`)
+- 피어 인증 토큰 검증 (`PI_ROBO_CLAW_TOKEN`) 및 Insecure 로컬 통신 지원
+- 클라이언트 미접속 시 아웃바운드 메시지 버퍼링 및 접속 시 즉시 플러시
+- 전송 Conformance 테스트 스위트에 `RoboClawTransport` 하네스 추가 및 전체 불변식 검증 (총 696개 테스트 통과)
+
 ## [0.5.0] - 2026-09-18
+
 
 ### Added
 

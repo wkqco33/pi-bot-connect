@@ -28,6 +28,8 @@ import {
 import { FakeTransport } from "./fake.js";
 import { TelegramTransport } from "./telegram/index.js";
 import { FakeTelegramRest } from "./telegram/doubles.js";
+import { RoboClawTransport } from "./robo_claw/index.js";
+import { FakeGrpcServerAdapter, type FakeGrpcCall } from "./robo_claw/doubles.js";
 
 export interface TransportContractTarget {
 	readonly transport: Transport;
@@ -254,6 +256,56 @@ async function telegramTarget(): Promise<TransportContractTarget> {
 	};
 }
 
+async function roboClawTarget(): Promise<TransportContractTarget> {
+	const dir = await mkdtemp(join(tmpdir(), "bot-connect-contract-rc-"));
+	const serverAdapter = new FakeGrpcServerAdapter();
+	const transport = new RoboClawTransport({
+		port: 50052,
+		lockDir: dir,
+		logger: silentLogger,
+		serverAdapter,
+	});
+	let activeCall: FakeGrpcCall | null = null;
+	cleanups.push(async () => {
+		await transport.stop().catch(() => undefined);
+		await rm(dir, { recursive: true, force: true });
+	});
+
+	return {
+		transport,
+		start: async (handler) => {
+			await transport.start(handler);
+			activeCall = serverAdapter.simulateClientConnect();
+		},
+		stop: () => transport.stop(),
+		reset: () => {
+			if (activeCall) activeCall.written.length = 0;
+		},
+		get posted() {
+			return activeCall ? activeCall.written.map((m) => m.content ?? "") : [];
+		},
+		get edited() {
+			return [];
+		},
+		setFailSend: (fail) => {
+			if (activeCall) {
+				if (fail) {
+					activeCall.write = () => {
+						throw new Error("gRPC stream write error");
+					};
+				} else {
+					activeCall.write = (msg) => {
+						activeCall!.written.push(msg);
+						return true;
+					};
+				}
+			}
+		},
+	};
+}
+
 describeTransportContract("FakeTransport", fakeTarget);
 describeTransportContract("DiscordTransport", discordTarget);
 describeTransportContract("TelegramTransport", telegramTarget);
+describeTransportContract("RoboClawTransport", roboClawTarget);
+

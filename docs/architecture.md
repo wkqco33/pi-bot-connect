@@ -20,8 +20,9 @@
 └────────────────────────────────────────────────────────────────────────────────┘
                                         │
 ┌──────────────── src/transports/* (유일한 I/O 경계) ─────────────────────────────────┐
-│  discord (구현) · fake (테스트) · telegram(TODO) · slack(TODO)                          │
+│  discord · telegram · robo_claw (gRPC 사내망) · fake (테스트)                        │
 └───────────────────────────────────────────────────────────────────────────────────────┘
+
 ```
 
 **의존 방향은 항상 위→아래다.** `core`가 `bridge`를, `bridge`가 `index.ts`를 import 하면 설계 위반이다.
@@ -75,7 +76,9 @@ interface Transport {
 | fake | 4000 | chars | markdown | false | false |
 | discord | 2000 | utf16 | markdown | false | true |
 | telegram | 4096 | bytes | html | true | true |
+| robo_claw | 4000 | chars | markdown | false | false |
 | slack | 4000 | chars | mrkdwn | true | true |
+
 
 `lengthUnit`은 플랫폼이 길이를 세는 방식이다: `chars`는 code point, `utf16`은 UTF-16 code unit, `bytes`는 UTF-8 바이트. **Discord는 code unit을 세므로 이모지 하나가 2000자 중 2를 먹는다** — `chars`로 선언하면 이모지가 많은 답변이 플랫폼 한도를 넘긴다.
 
