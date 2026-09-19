@@ -7,7 +7,7 @@
 
 ## 0. 프로젝트 한 줄 소개
 
-`pi-bot-connect`는 **pi 코딩 에이전트의 라이브 세션을 Discord/Slack/Telegram에 연결**하는 pi 확장이다.
+`pi-bot-connect`는 **pi 코딩 에이전트의 라이브 세션을 Discord·Telegram·사내망 RoboClaw(gRPC)에 연결**하는 pi 확장이다. Slack은 같은 코어 위에 추가 예정이다.
 알림 봇이 아니라 **핸드오프 브리지**다: 현재 작업을 공유하고, 메신저에서 다음 작업을 이어가고, 터미널로 돌아오면 그 작업이 이미 세션에 반영되어 있다.
 
 - 차별점/경쟁 분석: [`docs/feasibility.md`](docs/feasibility.md) — **작업 전에 읽어라**
@@ -82,11 +82,11 @@ pi.on("tool_execution_start", async (event, ctx) => {
 
 **"이 `if`는 정책인가?"** → 그렇다면 코어로 옮기고 테스트를 쓴다.
 `src/index.ts`는 커버리지에서 제외되어 있으므로, 여기 있는 로직은 **아무도 지켜주지 않는다**.
-예외는 `src/index.test.ts`(배선 테스트 36개)다. 이 테스트는 팩토리를 가짜 `ExtensionAPI`로 구동해 **이벤트 이름·명령 등록·설정 오류 전파**를 검증한다. 로직을 검증하려는 테스트를 여기 추가하려 한다면, 그 로직을 먼저 코어로 옮겨라.
+예외는 `src/index.test.ts`(배선 테스트 51개)다. 이 테스트는 팩토리를 가짜 `ExtensionAPI`로 구동해 **이벤트 이름·명령 등록·설정 오류 전파**를 검증한다. 로직을 검증하려는 테스트를 여기 추가하려 한다면, 그 로직을 먼저 코어로 옮겨라.
 
 ### R5. 보안 불변식을 깨지 않는다
 
-`docs/architecture.md` §3의 I1~I12. 특히:
+`docs/architecture.md` §3의 I1~I42(그 목록이 유일한 정본이다 — 여기 숫자가 낡았으면 문서를 믿어라). 특히:
 
 - **페어링 코드를 메신저로 보내지 마라.** 터미널에만 표시한다 (`pairingCodeNotice`만 코드를 렌더링한다)
 - **프롬프트 본문을 로그에 남기지 마라.** 로그에는 `reason`, `transport`, `deliverAs` 같은 메타데이터만
@@ -124,7 +124,9 @@ PI_BOT_CONNECT_DEBUG=1 pi -e ./src/index.ts   # 어댑터 로그 활성화
 | `PI_BOT_CONNECT_CONFIG` | 설정 파일 경로를 **강제**한다. 전역/프로젝트 탐색을 건너뛴다. 테스트·CI에서 개발자의 실제 설정에 의존하지 않기 위한 용도 |
 | `PI_BOT_CONNECT_STATE` | 상태 파일 경로를 **강제**한다. 락 디렉터리는 이 파일의 상위 디렉터리를 따른다 |
 | `PI_DISCORD_TOKEN` | Discord 봇 토큰. 설정의 `tokenEnv`로 이름 변경 가능. **값은 설정 파일에 쓰지 않는다** |
-| `PI_TELEGRAM_TOKEN` (예정) | Telegram 봇 토큰 |
+| `PI_TELEGRAM_TOKEN` | Telegram 봇 토큰. 설정의 `tokenEnv`로 이름 변경 가능 |
+| `PI_ROBO_CLAW_TOKEN` | RoboClaw gRPC 피어 인증 토큰. 설정의 `tokenEnv`로 이름 변경 가능. 미설정이면 Insecure로 바인딩된다 |
+| `PI_ROBO_CLAW_ENABLED` | `1`/`true`이면 설정 없이 RoboClaw 전송을 자동 활성화한다 (env 기반 자동 감지) |
 
 `src/index.test.ts`는 항상 `PI_BOT_CONNECT_CONFIG`와 `PI_BOT_CONNECT_STATE`로 임시 파일을 가리킨다. 테스트에서 `loadBridgeConfig`를 직접 쓰지 말고 이 방식을 따르라. Discord 전송 테스트는 토큰 환경변수를 직접 지우고 복원한다 (`src/transports/index.test.ts` 참조).
 
@@ -135,7 +137,7 @@ PI_BOT_CONNECT_DEBUG=1 pi -e ./src/index.ts   # 어댑터 로그 활성화
 ```text
 src/
 ├── index.ts                 [껍데기] pi 어댑터. 커버리지 제외. 정책 금지
-├── index.test.ts            배선 테스트 46개 — 가짜 ExtensionAPI로 팩토리를 구동
+├── index.test.ts            배선 테스트 51개 — 가짜 ExtensionAPI로 팩토리를 구동
 ├── bridge.ts                오케스트레이션. 전송↔코어↔세션 연결 + 송신 파이프라인
 ├── bridge.test.ts           74 테스트 — 전 구간 시나리오 (FakeTransport + FakeHost)
 ├── config.ts                설정 파일 검증 (신뢰할 수 없는 입력)
@@ -157,7 +159,9 @@ src/
 │   ├── redact.ts            비밀값 리댁션
 │   ├── digest.ts            작업 다이제스트(공유 카드) 생성
 │   ├── message.ts           pi 메시지에서 표시 텍스트/툴 출력 추출
+│   ├── progress.ts          진행 카드 상태 전이 + 표시 문자열(thinking… 포함). 순수
 │   ├── work.ts              git numstat/브랜치 + 테스트 러너 요약 파서
+│   ├── version.ts           설치된 package.json → 버전 표시 문자열. 순수
 │   ├── text.ts              멘션 제거, 접두사 매칭, 이스케이프
 │   ├── tool-policy.ts       원격 턴 도구 정책 + 승인 프롬프트 (G1). 순수 판정
 │   ├── rate-limit.ts        신원별 토큰 버킷. now 주입
@@ -192,6 +196,7 @@ src/
         ├── normalize.ts     ★ 순수. ChatMessage ↔ Envelope
         ├── normalize.test.ts
         ├── server.ts        gRPC 서버 추상화 + DefaultGrpcServerAdapter
+        │                    ← `@grpc/*`를 import하는 **유일한** 파일
         ├── index.ts         전송 본체: 포트 락 → gRPC 서버 바인딩 → ChatStream
         ├── index.test.ts
         └── doubles.ts       공유 테스트 더블 (coverage 제외)
@@ -199,6 +204,7 @@ src/
 
 
 **Discord 전송이 참조 구현이다.** 새 전송을 추가할 때 구조를 그대로 따라라: 순수 정규화 모듈 + 주입 가능한 I/O + 얇은 조합.
+`socket`을 여는 대신 **서버를 호스팅하는** 전송(RoboClaw)은 같은 원칙을 서버 어댑터에 적용한다: 실제 바인딩/`proto` 로딩은 `server.ts`에 가두고, 테스트는 `FakeGrpcServerAdapter`를 주입한다.
 
 각 `core/*.ts`에는 같은 이름의 `.test.ts`가 있다. **새 모듈을 만들면 테스트도 같이 만든다.**
 
@@ -316,6 +322,7 @@ import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
    - normalize.ts: payload → Envelope. 순수. 네트워크/시계/토큰 없음
    - gateway/폴링: I/O. 소켓과 타이머를 주입받는다
    - rest.ts: HTTP. fetch를 주입받는다
+   - server.ts: 서버를 호스팅하는 전송(gRPC 등)은 바인딩·프레임워크 로딩을 여기에 가두고 어댑터 인터페이스로 노출한다
    - index.ts: 신원 확인 → 락 → 수신 → send(). 가능하면 diagnose()도
 2. src/transports/index.ts의 FACTORIES에 팩토리 등록
    - 미설정이면 null 반환, `enabled: true`인데 자격증명이 없으면 throw
@@ -328,7 +335,9 @@ import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 8. pi -e ./src/index.ts 로 수동 왕복 1회 확인
 ```
 
-계층 분리가 곧 테스트 가능성이다. Discord 전송은 다음을 주입받기 때문에 봇 토큰·네트워크 없이 전 구간이 검증된다: `rest`(REST API), `createSocket`(WebSocket), `scheduler`(타이머), `fetchImpl`(첨부 다운로드).
+계층 분리가 곧 테스트 가능성이다. Discord 전송은 다음을 주입받기 때문에 봇 토큰·네트워크 없이 전 구간이 검증된다: `rest`(REST API), `createSocket`(WebSocket), `scheduler`(타이머), `fetchImpl`(첨부 다운로드). RoboClaw 전송은 `serverAdapter`(gRPC 서버)를 주입받아 실제 포트를 열지 않고 검증된다.
+
+**런타임 의존성이 필요한 전송이라면** §11의 의존성 규칙을 먼저 읽어라. 새 의존성은 그 어댑터 파일 하나에 격리하고, 같은 커밋에서 §10과 README "지원 범위"를 갱신한다.
 
 ### 첨부를 지원하려면
 
@@ -376,6 +385,10 @@ import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 | 테스트 러너 출력을 추측으로 파싱 | 버전이 바뀌면 조용히 틀린다 | `core/work.ts`의 패턴을 fixture로 고정하고, 못 찾으면 exit status로 폴백 |
 | **발행 직후 레지스트리 조회가 404/누락** | 발행이 실패한 줄 알고 되돌리려 함 | npm 전파에 몇 분 걸린다. **진짜는 워크플로 로그**다: `Publishing to … with tag …`, `Signed provenance statement`, `+ pkg@version`을 확인하고 `npm dist-tag ls`로 재확인하라 |
 | 이미 발행된 버전에 태그를 붙여 재발행 시도 | npm이 거부한다. provenance는 다시 쓸 수 없다 | `release.yml`이 발행 전에 레지스트리를 확인해 이미 있으면 publish를 건너뛰고 GitHub Release만 만든다 |
+| **gRPC 서버를 전송 본체에서 직접 띄움** | 테스트가 실제 포트/네이티브 바인딩을 요구하고, 실패 시 좀비 서버가 남는다 | 서버를 `GrpcServerAdapter`로 추상화한다. `FakeGrpcServerAdapter`를 주입하면 포트 없이 전 구간이 검증된다 (`robo_claw/server.ts`, `doubles.ts`) |
+| **proto 경로를 CWD 기준으로 해석** | `pi -e` 실행 디렉터리나 설치 레이아웃이 바뀌면 proto 로딩이 깨진다 | 모듈 기준으로 해석한다: `fileURLToPath(new URL("./proto/messenger.proto", import.meta.url))` (`robo_claw/server.ts`) |
+| **클라이언트 미접속 시 아웃바운드 유실** | 다이제스트/진행 카드를 보낼 때 클라이언트가 없으면 메시지가 사라진다 | 접속 전 아웃바운드를 버퍼링하고 스트림이 열리면 즉시 플러시한다 (`robo_claw/index.ts`) |
+| **런타임 의존성을 무심코 추가** | 감사 범위가 늘고, 코어까지 오염되면 순수성이 깨진다 | `dependencies`는 어댑터 파일 하나에 격리하고 이유를 커밋·CHANGELOG에 남긴다. 코어는 의존성 0을 유지한다 (§11) |
 
 ---
 
@@ -387,6 +400,7 @@ import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 - 함수는 하나의 책임. `switch` 대신 레코드 맵(`Record<Union, Fn>`)을 쓰면 exhaustiveness가 타입으로 보장된다
 - 주석은 **왜**를 설명한다. 무엇을 하는지는 이름으로
 - 이모지/과장된 표현 금지. 사용자에게 보이는 문자열은 간결한 영어 (원격 명령 응답 포함)
+- 외부 라이브러리 import는 그 라이브러리가 필요한 어댑터 파일 하나에 격리한다(예: `@grpc/*`는 `robo_claw/server.ts`만). 교체·제거가 한 파일에서 끝나야 한다
 - 탭 들여쓰기, 큰따옴표
 
 ---
@@ -414,7 +428,7 @@ docs(agents): document the transport conformance checklist
 - [ ] `npm run check` 통과
 - [ ] `core/`에 I/O나 숨은 시간/난수가 없다
 - [ ] `index.ts`에 정책이 들어가지 않았다
-- [ ] 보안 불변식(I1~I12)이 유지된다
+- [ ] 보안 불변식(`docs/architecture.md` §3, I1~I42)이 유지된다
 - [ ] 새 동작마다 테스트가 있고, 테스트 이름이 동작을 서술한다
 - [ ] 필요하면 `docs/`가 갱신되었다
 
@@ -427,13 +441,13 @@ docs(agents): document the transport conformance checklist
 | 코어 (라우팅/페어링/리댁션/청킹/마크다운/다이제스트) | ✅ 완료, 테스트로 고정 |
 | 브리지 오케스트레이션 | ✅ 완료 |
 | 설정 검증 | ✅ 완료 |
-| pi 어댑터 셸 + 로컬 `/connect` 명령 | ✅ 완료 (배선 테스트 36개) |
+| pi 어댑터 셸 + 로컬 `/connect` 명령 | ✅ 완료 (배선 테스트 51개) |
 | 상태 영속화 (세션별 격리) | ✅ 완료 |
 | 단일 인스턴스 락 | ✅ 완료 |
 | `/connect doctor` | ✅ 완료 |
 | `/connect version` | ✅ 완료 (설치된 `package.json`을 런타임에 읽는다) |
 | **Discord 전송** | ✅ 완료 (봇 SDK 없이 게이트웨이 직접 구현) |
-| 테스트 | 663 통과 / typecheck 0 에러 / 3회 연속 안정 |
+| 테스트 | 696 통과 (33 파일) / typecheck 0 에러 |
 | **첨부(이미지) 전달** | ✅ 완료 (양쪽 capability 확인 + 다운로드 후 크기 재검사) |
 | **진행 상황 edit-in-place** | ✅ 완료 (턴당 카드 1개, 스로틀, 편집 실패 시 폴백) |
 | **추론 진행 카드 + typing** | ✅ 완료 (툴 없는 구간은 `thinking…`, 선택적 `typing()`은 베스트 에포트) |
@@ -441,7 +455,9 @@ docs(agents): document the transport conformance checklist
 | **의미 단위(헤딩) 분할** | ✅ 완료 (섹션 경계 우선, 헤딩 고아 없음, 펜스 원자성 + 초과 펜스 복구) |
 | **다이제스트 데이터 소스** | ✅ 완료 (브랜치 / 변경 파일 / 테스트 결과) |
 | **Telegram 전송** | ✅ 완료 (롱폴링, 4096 bytes, HTML, `lock.ts` 재사용) |
-| **전송 conformance 키트** | ✅ 완료 (`transport-contract.test.ts`, Fake·Discord·Telegram 3종 통과) |
+| **RoboClaw gRPC 전송** | ✅ 완료 (사내망 gRPC 서버 호스팅, `ChatStream`, 피어 토큰 검증, 포트 락, 아웃바운드 버퍼링) |
+| **전송 conformance 키트** | ✅ 완료 (`transport-contract.test.ts`, Fake·Discord·Telegram·RoboClaw 4종 통과) |
+| **런타임 의존성** | ✅ 2개 — `@grpc/grpc-js`, `@grpc/proto-loader`. **RoboClaw 전용 예외로 확정**(그 외 0개). §11 참조 |
 | Slack 전송 | ❌ 미구현 |
 | **TODO를 다이제스트에 포함** | ✅ 완료 (`core/todo.ts`가 어시스턴트 체크리스트를 파싱) |
 | **송신 실패 격리 / 게이트웨이 재연결 / 요청 타임아웃·재시도** | ✅ 완료 (I30~I32) |
@@ -450,7 +466,7 @@ docs(agents): document the transport conformance checklist
 | **리플레이 하네스** | ✅ 완료 (`core/transcript.ts` + `transports/replay.ts`, I42) |
 | **브로드캐스트 정책 (`broadcast`)** | ✅ 완료 (I35) |
 | **리댁션 확장 + 규칙명 로깅** | ✅ 완료 (I36) |
-| npm 배포 | ✅ 0.3.0 공개. 다음 릴리스는 `package.json` 버전을 올려 `v<version>` 태그를 푸시하면 CI가 provenance와 함께 발행 |
+| npm 배포 | ✅ 0.6.0 공개. 다음 릴리스는 `package.json` 버전을 올려 `v<version>` 태그를 푸시하면 CI가 provenance와 함께 발행 |
 | CI / 릴리스 파이프라인 | ✅ `master` push + PR에서 CI, `v*` 태그에서 OIDC 발행. `0.1.1-rc.1`로 검증 완료 |
 | **실제 Discord 왕복** | ✅ 0.3.0에서 검증 (텍스트·이미지 프롬프트, 진행 카드, 긴 답변 분할) |
 
@@ -480,9 +496,18 @@ src/              배포 대상. TS를 그대로 올린다 — pi가 jiti로 로
 docs/             분석·아키텍처 문서
 ```
 
-**런타임 의존성은 0개다.** `@earendil-works/pi-coding-agent`만 peer dependency고
-빌드 산출물이 없다. 이 상태를 유지해라 — 의존성이 늘면 감사 범위가 늘어난다.
-`dependencies`에 무언가 추가해야 한다면 AGENTS.md §0의 정체성과 충돌하는지 먼저 따져라.
+**런타임 의존성 정책: 코어는 0개, 예외는 RoboClaw 하나.** `dependencies`에 허용된 것은
+RoboClaw gRPC 전송을 위한 `@grpc/grpc-js`, `@grpc/proto-loader` 두 개뿐이며, 이는
+**의도된 예외로 승인되었다** — 사내망 gRPC 서버 호스팅은 stdlib로 대체할 수 없다.
+`@earendil-works/pi-coding-agent`는 peer dependency이고 빌드 산출물은 없다
+(`pi`가 jiti로 TS를 그대로 로드한다).
+
+의존성 규칙:
+
+- **코어(`src/core/`)는 의존성 0을 유지한다.** 외부 라이브러리를 코어에 넣지 마라 (R3)
+- 외부 import는 **그 전송의 어댑터 파일 하나에만** 둔다. 현재 `@grpc/*`의 유일한 소비자는 `src/transports/robo_claw/server.ts`다. 교체·제거가 한 파일에서 끝나야 한다
+- **RoboClaw 외에 새 런타임 의존성을 추가하는 것은 이 예외를 확장하는 일이다.** (1) stdlib·기존 코드로 안 되는 이유와 (2) 감사 범위 증가를 감수할 근거를 커밋 메시지에 남기고, (3) **같은 커밋에서 §10과 README "지원 범위" 표를 갱신**한다
+- 추가 전에 §0의 정체성(알림 봇이 아니라 핸드오프 브리지)과 충돌하는지 따져라
 
 ### 버전 규칙
 

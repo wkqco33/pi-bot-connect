@@ -49,7 +49,7 @@ pi -e ./src/index.ts          # 현재 디렉터리의 소스로 한 번만 실�
 | 이미지가 아닌 첨부 | 거부한다 (조용히 버리지 않음) |
 | 다중 세션 | 세션당 1전송. 단일 봇 + 다중 세션 라우팅은 미구현 |
 | 암호화 | 없음 — 플랫폼 전송 계층에 의존 |
-| 런타임 의존성 | 0개 |
+| 런타임 의존성 | 2개 — `@grpc/grpc-js`, `@grpc/proto-loader` (RoboClaw gRPC 전송 전용 예외). 그 외 0개 |
 
 CI는 Node 22.19와 24에서 `npm run check`와 `npm run pack:verify`를 실행한다
 (`.github/workflows/ci.yml`). 릴리스는 `v*` 태그를 푸시하면
