@@ -13,6 +13,7 @@
  * contents is pure (`parseStoreSnapshot`) and unit-tested.
  */
 
+import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { BridgeStore, ConversationTarget } from "./bridge.js";
@@ -180,6 +181,28 @@ export interface FileBridgeStoreOptions {
 	readonly now?: () => number;
 }
 
+/**
+ * One write queue per state file, shared by every store in this process.
+ *
+ * Two live stores (a `/reload` overlap, or a future multi-session broker) would
+ * otherwise interleave read-merge-write and drop each other's sessions. Separate
+ * processes cannot share this queue, so their writes stay last-writer-wins;
+ * `mergeForeignSessions` is what keeps that from erasing another session.
+ */
+const writeQueues = new Map<string, Promise<void>>();
+
+function enqueueWrite(path: string, task: () => Promise<void>): Promise<void> {
+	const previous = writeQueues.get(path) ?? Promise.resolve();
+	// `then(task, task)`: a failed write must not block the next one.
+	const next = previous.then(task, task);
+	const settled = next.catch(() => undefined);
+	writeQueues.set(path, settled);
+	void settled.then(() => {
+		if (writeQueues.get(path) === settled) writeQueues.delete(path);
+	});
+	return next;
+}
+
 export class FileBridgeStore implements BridgeStore {
 	private readonly path: string;
 	private readonly sessionId: string;
@@ -188,6 +211,8 @@ export class FileBridgeStore implements BridgeStore {
 	private readonly now: () => number;
 
 	private readonly all: Record<string, SessionState>;
+	/** Makes this instance's temp file unique, even against a sibling in-process store. */
+	private readonly writeId = randomUUID();
 	private queue: Promise<void> = Promise.resolve();
 	private dirty = false;
 
@@ -294,17 +319,25 @@ export class FileBridgeStore implements BridgeStore {
 		for (const [sessionId, state] of Object.entries(parseStoreSnapshot(parsed).snapshot.sessions)) {
 			if (sessionId === this.sessionId) continue;
 			const mine = this.all[sessionId];
-			if (mine === undefined || state.updatedAt > mine.updatedAt) this.all[sessionId] = state;
+			// `>=`: on a timestamp tie the file's copy was persisted later, and this
+			// store's copy is the older one. Strict `>` loses same-millisecond updates.
+			if (mine === undefined || state.updatedAt >= mine.updatedAt) this.all[sessionId] = state;
 		}
 	}
 
 	private async writeOnce(): Promise<void> {
+		await enqueueWrite(this.path, () => this.writeFileAtomic());
+	}
+
+	private async writeFileAtomic(): Promise<void> {
+		// Merge inside the queue: the file may have moved on since this store read it.
 		await this.mergeForeignSessions();
 		this.prune();
 		const snapshot: StoreSnapshot = { version: STORE_VERSION, sessions: this.all };
 		const data = `${JSON.stringify(snapshot, null, "\t")}\n`;
 		const directory = dirname(this.path);
-		const temporary = `${this.path}.tmp-${process.pid}`;
+		// pid + instance id: a sibling store in this process must not share it.
+		const temporary = `${this.path}.tmp-${process.pid}-${this.writeId}`;
 
 		await mkdir(directory, { recursive: true, mode: 0o700 });
 

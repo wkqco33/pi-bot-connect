@@ -259,6 +259,39 @@ describe("FileBridgeStore — session isolation", () => {
 		expect(Object.keys(sessions.s1?.trusted ?? {}).sort()).toEqual(["discord:1", "discord:2"]);
 	});
 
+	it("keeps the file parseable when several stores write at the same time", async () => {
+		// A torn write makes the next pi start from an empty store, silently losing
+		// every pairing. Temp files must not collide between live instances.
+		const ids = ["s1", "s2", "s3", "s4", "s5"];
+		const stores = await Promise.all(ids.map((sessionId) => open({ path, sessionId })));
+		stores.forEach((store, index) => store.trust(`${ids[index]}:u`, index + 1));
+		await Promise.all(stores.map((store) => store.flush()));
+
+		const sessions = (await readState(path)).sessions as Record<string, { trusted: Record<string, number> }>;
+		expect(Object.keys(sessions).sort()).toEqual([...ids].sort());
+		for (const [index, id] of ids.entries()) {
+			expect(sessions[id]?.trusted).toEqual({ [`${id}:u`]: index + 1 });
+		}
+	});
+
+	it("adopts a foreign session updated in the same millisecond", async () => {
+		const frozen = () => 5;
+		const other = await open({ path, sessionId: "a", now: frozen });
+		await other.flush();
+
+		// This store now holds a copy of `a` from before the pairing below.
+		const mine = await open({ path, sessionId: "b", now: frozen });
+		other.trust("discord:1", 5);
+		await other.flush();
+
+		mine.setPaused("discord:c", true);
+		await mine.flush();
+
+		// Equal timestamps: the file's copy was persisted later, so it wins.
+		const reopened = await open({ path, sessionId: "a" });
+		expect(reopened.isTrusted("discord:1")).toBe(true);
+	});
+
 	it("prunes the oldest sessions beyond maxSessions", async () => {
 		let clock = 0;
 		const now = () => ++clock;

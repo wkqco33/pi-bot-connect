@@ -390,6 +390,7 @@ import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 | **gRPC 서버를 전송 본체에서 직접 띄움** | 테스트가 실제 포트/네이티브 바인딩을 요구하고, 실패 시 좀비 서버가 남는다 | 서버를 `GrpcServerAdapter`로 추상화한다. `FakeGrpcServerAdapter`를 주입하면 포트 없이 전 구간이 검증된다 (`robo_claw/server.ts`, `doubles.ts`) |
 | **두 번째 pi가 락을 긴 error 문자열로 보고함** | 터미널이 오류 문단으로 덮이고, 푸터는 그 전송이 실행 중인 것처럼 보인다 | 락 보유는 `LockHeldError`(타입)로 던지고 브리지가 `standby`로 분류한다: 한 줄 경고 + `runningTransportIds` 제외 + 자동 인수 재시도 (I43~I44) |
 | **여러 프로세스가 같은 상태 파일을 통째로 덮어씀** | 다른 세션의 페어링이 사라진 뒤 특정 시점에만 복구된다 | 쓰기 직전 파일을 다시 읽어 더 새로운 **다른 세션**만 채택한다. 자기 세션은 메모리가 정본 (I46, `file-store.ts`) |
+| **같은 프로세스의 두 store가 temp 파일 이름을 공유** | 동시 쓰기가 서로의 temp를 덮어써 JSON이 깨지고, 다음 시작이 빈 스토어로 뜬다(페어링 전부 유실) | temp 이름에 pid + 인스턴스 id를 붙이고, 경로별 큐로 쓰기를 직렬화한다 (I47) |
 | **proto 경로를 CWD 기준으로 해석** | `pi -e` 실행 디렉터리나 설치 레이아웃이 바뀌면 proto 로딩이 깨진다 | 모듈 기준으로 해석한다: `fileURLToPath(new URL("./proto/messenger.proto", import.meta.url))` (`robo_claw/server.ts`) |
 | **클라이언트 미접속 시 아웃바운드 유실** | 다이제스트/진행 카드를 보낼 때 클라이언트가 없으면 메시지가 사라진다 | 접속 전 아웃바운드를 버퍼링하고 스트림이 열리면 즉시 플러시한다 (`robo_claw/index.ts`) |
 | **런타임 의존성을 무심코 추가** | 감사 범위가 늘고, 코어까지 오염되면 순수성이 깨진다 | `dependencies`는 어댑터 파일 하나에 격리하고 이유를 커밋·CHANGELOG에 남긴다. 코어는 의존성 0을 유지한다 (§11) |
@@ -451,7 +452,7 @@ docs(agents): document the transport conformance checklist
 | `/connect doctor` | ✅ 완료 |
 | `/connect version` | ✅ 완료 (설치된 `package.json`을 런타임에 읽는다) |
 | **Discord 전송** | ✅ 완료 (봇 SDK 없이 게이트웨이 직접 구현) |
-| 테스트 | 763 통과 (35 파일) / typecheck 0 에러 |
+| 테스트 | 765 통과 (35 파일) / typecheck 0 에러 |
 | **첨부(이미지) 전달** | ✅ 완료 (양쪽 capability 확인 + 다운로드 후 크기 재검사) |
 | **진행 상황 edit-in-place** | ✅ 완료 (턴당 카드 1개, 스로틀, 편집 실패 시 폴백) |
 | **추론 진행 카드 + typing** | ✅ 완료 (툴 없는 구간은 `thinking…`, 선택적 `typing()`은 베스트 에포트) |
