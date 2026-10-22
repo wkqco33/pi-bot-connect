@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { acquireLock, DEFAULT_STALE_MS, describeHolder, type LockInfo } from "./lock.js";
+import { acquireLock, DEFAULT_STALE_MS, describeHolder, LockHeldError, type LockInfo } from "./lock.js";
 
 let dir: string;
 let path: string;
@@ -164,6 +164,34 @@ describe("lock.release", () => {
 
 		await first.lock.release();
 		expect(await readLock(path)).toMatchObject({ pid: 200 });
+	});
+});
+
+describe("LockHeldError", () => {
+	const holder: LockInfo = { pid: 86946, startedAt: Date.now(), host: "gram15", token: "super-secret-token" };
+
+	it("is identifiable by name so the bridge can classify it without importing fs", () => {
+		expect(new LockHeldError(path, holder).name).toBe("LockHeldError");
+	});
+
+	it("carries the holder for the bridge to describe", () => {
+		expect(new LockHeldError(path, holder).holder).toEqual(holder);
+	});
+
+	it("keeps the message to one short line", () => {
+		const message = new LockHeldError(path, holder).message;
+		expect(message).not.toContain("\n");
+		expect(message.length).toBeLessThanOrEqual(80);
+	});
+
+	it("never renders the holder token or the lock path", () => {
+		const message = new LockHeldError(path, holder).message;
+		expect(message).not.toContain("super-secret-token");
+		expect(message).not.toContain(path);
+	});
+
+	it("explains an unknown holder without inventing one", () => {
+		expect(new LockHeldError(path, null).message).toContain("another process");
 	});
 });
 

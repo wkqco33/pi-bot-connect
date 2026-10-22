@@ -158,7 +158,11 @@ export interface Transport {
 
 export interface TransportDiagnostics {
 	readonly id: TransportId;
-	readonly status: "running" | "stopped" | "error";
+	/**
+	 * `standby` means another pi process owns the credential: this transport is
+	 * alive but another process receives the messages. It is not an error.
+	 */
+	readonly status: "running" | "standby" | "stopped" | "error";
 	/** Human-readable detail. Never contains secrets. */
 	readonly detail?: string;
 }

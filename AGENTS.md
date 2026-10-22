@@ -162,6 +162,8 @@ src/
 │   ├── progress.ts          진행 카드 상태 전이 + 표시 문자열(thinking… 포함). 순수
 │   ├── work.ts              git numstat/브랜치 + 테스트 러너 요약 파서
 │   ├── version.ts           설치된 package.json → 버전 표시 문자열. 순수
+│   ├── status.ts            푸터 라벨/`status`/`doctor` 렌더링. 순수
+│   ├── start-failure.ts     시작 실패 분류(standby vs error) + 한 줄 알림. 순수
 │   ├── text.ts              멘션 제거, 접두사 매칭, 이스케이프
 │   ├── tool-policy.ts       원격 턴 도구 정책 + 승인 프롬프트 (G1). 순수 판정
 │   ├── rate-limit.ts        신원별 토큰 버킷. now 주입
@@ -386,6 +388,8 @@ import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 | **발행 직후 레지스트리 조회가 404/누락** | 발행이 실패한 줄 알고 되돌리려 함 | npm 전파에 몇 분 걸린다. **진짜는 워크플로 로그**다: `Publishing to … with tag …`, `Signed provenance statement`, `+ pkg@version`을 확인하고 `npm dist-tag ls`로 재확인하라 |
 | 이미 발행된 버전에 태그를 붙여 재발행 시도 | npm이 거부한다. provenance는 다시 쓸 수 없다 | `release.yml`이 발행 전에 레지스트리를 확인해 이미 있으면 publish를 건너뛰고 GitHub Release만 만든다 |
 | **gRPC 서버를 전송 본체에서 직접 띄움** | 테스트가 실제 포트/네이티브 바인딩을 요구하고, 실패 시 좀비 서버가 남는다 | 서버를 `GrpcServerAdapter`로 추상화한다. `FakeGrpcServerAdapter`를 주입하면 포트 없이 전 구간이 검증된다 (`robo_claw/server.ts`, `doubles.ts`) |
+| **두 번째 pi가 락을 긴 error 문자열로 보고함** | 터미널이 오류 문단으로 덮이고, 푸터는 그 전송이 실행 중인 것처럼 보인다 | 락 보유는 `LockHeldError`(타입)로 던지고 브리지가 `standby`로 분류한다: 한 줄 경고 + `runningTransportIds` 제외 + 자동 인수 재시도 (I43~I44) |
+| **여러 프로세스가 같은 상태 파일을 통째로 덮어씀** | 다른 세션의 페어링이 사라진 뒤 특정 시점에만 복구된다 | 쓰기 직전 파일을 다시 읽어 더 새로운 **다른 세션**만 채택한다. 자기 세션은 메모리가 정본 (I46, `file-store.ts`) |
 | **proto 경로를 CWD 기준으로 해석** | `pi -e` 실행 디렉터리나 설치 레이아웃이 바뀌면 proto 로딩이 깨진다 | 모듈 기준으로 해석한다: `fileURLToPath(new URL("./proto/messenger.proto", import.meta.url))` (`robo_claw/server.ts`) |
 | **클라이언트 미접속 시 아웃바운드 유실** | 다이제스트/진행 카드를 보낼 때 클라이언트가 없으면 메시지가 사라진다 | 접속 전 아웃바운드를 버퍼링하고 스트림이 열리면 즉시 플러시한다 (`robo_claw/index.ts`) |
 | **런타임 의존성을 무심코 추가** | 감사 범위가 늘고, 코어까지 오염되면 순수성이 깨진다 | `dependencies`는 어댑터 파일 하나에 격리하고 이유를 커밋·CHANGELOG에 남긴다. 코어는 의존성 0을 유지한다 (§11) |
@@ -447,7 +451,7 @@ docs(agents): document the transport conformance checklist
 | `/connect doctor` | ✅ 완료 |
 | `/connect version` | ✅ 완료 (설치된 `package.json`을 런타임에 읽는다) |
 | **Discord 전송** | ✅ 완료 (봇 SDK 없이 게이트웨이 직접 구현) |
-| 테스트 | 696 통과 (33 파일) / typecheck 0 에러 |
+| 테스트 | 763 통과 (35 파일) / typecheck 0 에러 |
 | **첨부(이미지) 전달** | ✅ 완료 (양쪽 capability 확인 + 다운로드 후 크기 재검사) |
 | **진행 상황 edit-in-place** | ✅ 완료 (턴당 카드 1개, 스로틀, 편집 실패 시 폴백) |
 | **추론 진행 카드 + typing** | ✅ 완료 (툴 없는 구간은 `thinking…`, 선택적 `typing()`은 베스트 에포트) |
@@ -469,6 +473,7 @@ docs(agents): document the transport conformance checklist
 | npm 배포 | ✅ 0.6.0 공개. 다음 릴리스는 `package.json` 버전을 올려 `v<version>` 태그를 푸시하면 CI가 provenance와 함께 발행 |
 | CI / 릴리스 파이프라인 | ✅ `master` push + PR에서 CI, `v*` 태그에서 OIDC 발행. `0.1.1-rc.1`로 검증 완료 |
 | **실제 Discord 왕복** | ✅ 0.3.0에서 검증 (텍스트·이미지 프롬프트, 진행 카드, 긴 답변 분할) |
+| **다중 pi 인스턴스 (standby + 자동 인수)** | ✅ 완료 (락 보유를 `standby`로 분류, 한 줄 경고, 15초 재시도 인수, 상태 파일 병합) |
 
 전체 로드맵과 미해결 과제: `docs/architecture.md` §9, `docs/feasibility.md` §6.
 

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Envelope } from "../../core/types.js";
-import { acquireLock } from "../../lock.js";
+import { acquireLock, LockHeldError } from "../../lock.js";
 import { FakeGrpcServerAdapter, silentLogger } from "./doubles.js";
 import { RoboClawTransport } from "./index.js";
 
@@ -87,9 +87,8 @@ describe("RoboClawTransport", () => {
 		});
 		expect(existingLock.ok).toBe(true);
 
-		await expect(transport.start(() => {})).rejects.toThrow(
-			/another process.*robo_claw/i,
-		);
+		const failure = await transport.start(() => {}).catch((error: unknown) => error);
+		expect(failure).toBeInstanceOf(LockHeldError);
 
 		if (existingLock.ok) {
 			await existingLock.lock.release();

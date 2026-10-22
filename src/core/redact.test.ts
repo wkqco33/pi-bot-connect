@@ -35,6 +35,18 @@ describe("redactSecrets", () => {
 		expect(out).toContain("[redacted:private-key]");
 	});
 
+	it("redacts a Telegram token inside the bot API URL", () => {
+		const token = `123456789:${'A'.repeat(35)}`;
+		const out = redactSecrets(`connect failed for https://api.telegram.org/bot${token}/getMe`);
+		expect(out).not.toContain('A'.repeat(35));
+		expect(out).toContain("[redacted:telegram-token]");
+	});
+
+	it("redacts a bare Telegram token", () => {
+		const out = redactSecrets(`token 123456789:${'B'.repeat(35)} rejected`);
+		expect(out).not.toContain('B'.repeat(35));
+	});
+
 	it("redacts JSON web tokens", () => {
 		const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
 		const out = redactSecrets(`token ${jwt}`);

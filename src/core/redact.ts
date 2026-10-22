@@ -34,7 +34,9 @@ export const DEFAULT_REDACTION_RULES: readonly RedactionRule[] = [
 	{ name: "google-api-key", pattern: /\bAIza[A-Za-z0-9_-]{35}\b/g, replacement: "[redacted:google-key]" },
 	{
 		name: "telegram-bot-token",
-		pattern: /\b\d{8,12}:[A-Za-z0-9_-]{35}\b/g,
+		// Telegram's own API URLs embed the token as `/bot<id>:<secret>/...`, so a
+		// leading `\b` alone would miss the most common way a token leaks here.
+		pattern: /\bbot\d{8,12}:[A-Za-z0-9_-]{35}\b|(?<![\w])\d{8,12}:[A-Za-z0-9_-]{35}\b/g,
 		replacement: "[redacted:telegram-token]",
 	},
 	{

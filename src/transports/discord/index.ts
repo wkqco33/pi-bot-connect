@@ -9,7 +9,7 @@
  */
 
 import { join } from "node:path";
-import { acquireLock, describeHolder, type LockHandle } from "../../lock.js";
+import { acquireLock, LockHeldError, type LockHandle } from "../../lock.js";
 import type {
 	Envelope,
 	EnvelopeHandler,
@@ -119,16 +119,13 @@ export class DiscordTransport implements Transport {
 		this.botId = me.id;
 		this.botUsername = me.username;
 
+		const lockPath = join(this.options.lockDir, `discord-${me.id}.lock`);
 		const acquired = await acquireLock({
-			path: join(this.options.lockDir, `discord-${me.id}.lock`),
+			path: lockPath,
 			logger: this.options.logger,
 			...(this.options.lockStaleMs === undefined ? {} : { staleMs: this.options.lockStaleMs }),
 		});
-		if (!acquired.ok) {
-			throw new Error(
-				`another pi process already holds this Discord bot (${describeHolder(acquired.holder)}); Discord allows only one gateway session per bot token`,
-			);
-		}
+		if (!acquired.ok) throw new LockHeldError(lockPath, acquired.holder);
 		this.lock = acquired.lock;
 
 		this.handler = handler;

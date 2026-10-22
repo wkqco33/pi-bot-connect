@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Envelope } from "../../core/types.js";
-import { acquireLock } from "../../lock.js";
+import { acquireLock, LockHeldError } from "../../lock.js";
 import {
 	FakeRest,
 	FakeScheduler,
@@ -145,7 +145,11 @@ describe("DiscordTransport — startup", () => {
 		expect(held.ok).toBe(true);
 
 		const h = setup();
-		await expect(h.transport.start(() => {})).rejects.toThrow(/another pi process already holds/);
+		const failure = await h.transport.start(() => {}).catch((error: unknown) => error);
+		// A typed error carries the holder, so the bridge can call this standby
+		// instead of showing a paragraph of prose.
+		expect(failure).toBeInstanceOf(LockHeldError);
+		expect((failure as LockHeldError).holder?.pid).toBe(process.pid);
 		expect(h.sockets).toHaveLength(0);
 	});
 

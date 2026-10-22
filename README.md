@@ -330,11 +330,23 @@ Discord REST      ◄── chunk+markdown+redact ◄──────┘
 - 모델에게 없는 첨부를 보라고 하지 않는다. 전달할 수 없으면 명시적으로 거부한다
 - 원격 턴 도구 정책으로 프롬프트 인젝션을 제한한다 (`bridge.remoteToolPolicy`, 기본 unrestricted)
 
-### Discord 게이트웨이와 동시 실행
+### 여러 pi 프로세스를 동시에 띄울 때
 
-Discord는 봇 토큰당 게이트웨이 세션을 하나만 허용한다. 같은 봇으로 pi를 두 개 띄우면 나중 것이 앞 것을 끊는다. 그래서 **봇 ID 기준 단일 인스턴스 락**을 건다. 두 번째 프로세스는 명확한 오류와 함께 시작을 거부한다.
+Discord는 봇 토큰당 게이트웨이 세션을 하나만 허용하고, Telegram은 같은 토큰으로 두 프로세스가 `getUpdates`를 호출하면 409를 반환하며, RoboClaw는 포트를 하나만 쓸 수 있다. 그래서 **자격증명(봇 ID 또는 포트) 기준 단일 인스턴스 락**을 건다.
 
-`/connect doctor`의 `lock held` / `lock not held`로 확인할 수 있다.
+두 번째 프로세스는 실패가 아니라 **standby**가 된다:
+
+```text
+[bot-connect] discord: standby — pid 86946 on gram15 owns this bot    # 짧은 경고 한 줄
+```
+
+| 위치 | 표시 |
+| --- | --- |
+| 푸터 | `bot-connect: standby (discord)` — 실행 중인 것처럼 표시하지 않는다 |
+| `/connect status` | `- transports: discord (standby — pid 86946 on gram15 owns this bot; retrying every 15s)` |
+| `/connect doctor` | `- discord: standby — ...` (정상 상태로 취급) |
+
+먼저 띄운 프로세스를 종료하면 나머지 세션이 **최대 15초 안에 자동으로 인수**한다 (`discord: took over from the previous pi process`). 락을 실제로 보유한 프로세스가 없는데도 막혀 보이면 `/connect doctor`의 락 상태와 `~/.pi/agent/locks/`를 확인한다.
 
 ---
 

@@ -219,6 +219,46 @@ describe("FileBridgeStore — session isolation", () => {
 		expect(reopened.isTrusted("discord:42")).toBe(true);
 	});
 
+	it("keeps a session that paired after this process loaded the file", async () => {
+		// Two pi processes share one state file. Both load it, then the first one
+		// pairs. Without a merge the second write erases that pairing.
+		const other = await open({ path, sessionId: "session-a" });
+		const mine = await open({ path, sessionId: "session-b" });
+
+		other.trust("discord:42", 5);
+		await other.flush();
+
+		mine.setPaused("discord:c2", true);
+		await mine.flush();
+
+		const reopened = await open({ path, sessionId: "session-a" });
+		expect(reopened.isTrusted("discord:42")).toBe(true);
+	});
+
+	it("does not let a stale file overwrite this session's own state", async () => {
+		const store = await open({ path, sessionId: "s1", now: () => 10 });
+		store.trust("discord:1", 10);
+		await store.flush();
+
+		// Another process writes an older copy of the same session.
+		await writeFile(
+			path,
+			JSON.stringify({
+				version: STORE_VERSION,
+				sessions: {
+					s1: { updatedAt: 1, trusted: {}, pending: {}, paused: [], conversations: [] },
+				},
+			}),
+			"utf8",
+		);
+
+		store.trust("discord:2", 11);
+		await store.flush();
+
+		const sessions = (await readState(path)).sessions as Record<string, { trusted: Record<string, number> }>;
+		expect(Object.keys(sessions.s1?.trusted ?? {}).sort()).toEqual(["discord:1", "discord:2"]);
+	});
+
 	it("prunes the oldest sessions beyond maxSessions", async () => {
 		let clock = 0;
 		const now = () => ++clock;

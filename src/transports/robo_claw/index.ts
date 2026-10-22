@@ -14,7 +14,7 @@ import type {
 	Transport,
 	TransportCapabilities,
 } from "../../core/types.js";
-import { acquireLock, type LockHandle } from "../../lock.js";
+import { acquireLock, LockHeldError, type LockHandle } from "../../lock.js";
 import {
 	extractAuthToken,
 	normalizeInbound,
@@ -97,9 +97,7 @@ export class RoboClawTransport implements Transport {
 		});
 
 		if (!acquired.ok) {
-			throw new Error(
-				`Another process holds the lock for robo_claw on port ${this.port}`,
-			);
+			throw new LockHeldError(lockPath, acquired.holder);
 		}
 		this.lock = acquired.lock;
 

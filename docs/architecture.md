@@ -17,6 +17,7 @@
 │  types · router · commands · pairing · chunk · markdown-blocks                 │
 │  markdown · redact · digest · message · work · text · notices · logger         │
 │  tool-policy (원격 턴 도구 제한) · rate-limit · todo · transcript              │
+│  status (푸터/doctor 렌더링) · start-failure (standby 판정)                     │
 └────────────────────────────────────────────────────────────────────────────────┘
                                         │
 ┌──────────────── src/transports/* (유일한 I/O 경계) ─────────────────────────────────┐
@@ -134,6 +135,10 @@ Discord는 스레드에서 `channel_id`가 스레드 자체의 id이므로 `conv
 | I40 | Telegram 업데이트는 순수 정규화를 거치며, 봇 자신/다른 봇 메시지와 다른 봇을 향한 명령은 무시한다. | `telegram/normalize.test.ts` |
 | I41 | 모든 전송은 conformance 키트를 통과한다(시작 전 send 거부, stop 멱등, 실패 표면화, editKey 편집, 미지원 threadId 수용, 토큰 비노출). | `transport-contract.test.ts` |
 | I42 | transcript 기록은 리댁션을 거치고 `raw` 플랫폼 payload를 버린다. 재생 시 잘못된 줄은 경고와 함께 무시한다. | `transcript.test.ts`, `replay.test.ts` |
+| I43 | 다른 pi 프로세스가 보유한 자격증명은 **실패가 아니라 `standby`다.** 알림은 한 줄(≤80자) 경고이고, `diagnostics()`는 `error`가 아니라 `standby`를 보고한다. | `start-failure.test.ts`, `bridge.test.ts`, `index.test.ts` |
+| I44 | `standby` 전송은 `runningTransportIds`에 포함되지 않는다(푸터·상태 보고가 실행 중인 것처럼 표시하지 않는다). 락이 풀리면 재시도로 인수하고, 인수 시 호스트에 상태 변경을 알린다. 브리지가 멈추면 타이머가 취소되고 **진행 중이던 인수는 자격증명을 반납**한다(락 누수 금지). | `bridge.test.ts`, `index.test.ts` |
+| I45 | 시작 실패 알림은 리댁션 + 공백 정규화 + 길이 상한(160자)을 거친다. 원문 스택/URL 토큰이 TUI로 새지 않는다. | `start-failure.test.ts`, `redact.test.ts` |
+| I46 | 두 프로세스가 같은 상태 파일을 공유해도 다른 세션의 상태를 지우지 않는다(쓰기 직전 파일을 다시 읽어 더 새로운 외부 세션만 채택). 자기 세션은 항상 메모리가 정본이다. | `file-store.test.ts` |
 
 ---
 
@@ -143,10 +148,10 @@ Discord는 스레드에서 `channel_id`가 스레드 자체의 id이므로 `conv
 
 | 계층 | 방식 | 현재 |
 | --- | --- | --- |
-| `core/*` | 순수 함수 단위 테스트. 결정적 rng/clock 주입 | 288 테스트 |
-| `bridge.ts` | `FakeTransport` + `FakeHost`로 전 구간 시나리오 | 74 테스트 |
+| `core/*` | 순수 함수 단위 테스트. 결정적 rng/clock 주입 | 330+ 테스트 |
+| `bridge.ts` | `FakeTransport` + `FakeHost`로 전 구간 시나리오 | 90 테스트 |
 | `config.ts` | 신뢰할 수 없는 JSON 검증 테이블 테스트 | 38 테스트 |
-| `index.ts` | 타입체크 + 배선 테스트(가짜 `ExtensionAPI`로 팩토리 구동). **커버리지 제외** | 36 테스트 |
+| `index.ts` | 타입체크 + 배선 테스트(가짜 `ExtensionAPI`로 팩토리 구동). **커버리지 제외** | 56 테스트 |
 | `transports/*` | 계약 conformance + 플랫폼별 payload fixture | 150+ 테스트 |
 
 ### 4.2 결정성 확보 방법
@@ -208,6 +213,8 @@ const decision = decidePairing({ ..., now: 10, random: digitSequence("987654") }
 - [ ] 토큰/원문 payload를 로그에 남기지 않는다
 - [ ] 레이트리밋/재연결에 백오프가 있다
 - [ ] 단일 인스턴스 락을 존중한다 (폴링/게이트웨이형 전송). 시작 실패 시 락을 반드시 해제한다
+- [ ] 락 보유는 `LockHeldError(path, holder)`로 던진다 (`new Error("another pi process ...")` 금지). 브리지가 `standby`로 분류하는 근거다
+- [ ] `stop()`은 시작 전 상태에서도 안전하다. 자동 인수는 `start()`를 다시 호출하므로 재호출 가능해야 한다
 - [ ] 자기 자신과 다른 봇의 메시지를 무시한다 (`author.bot`, `webhook_id`)
 - [ ] 자격증명 검증을 먼저 한다. 잘못된 토큰은 소켓/폴링을 열기 전에 실패한다
 - [ ] `diagnose()`가 있고 토큰을 포함하지 않는다
@@ -293,6 +300,24 @@ const decision = decidePairing({ ..., now: 10, random: digitSequence("987654") }
 
 검증 결과는 오류(거부)와 경고(무시)로 나뉘며, 둘 다 로컬에 표시된다 (`config.test.ts` 참조).
 
+### 7.1 여러 pi 프로세스가 동시에 실행될 때
+
+메신저 플랫폼은 자격증명당 소비자 하나만 허용한다. 락(`lock.ts`)이 그 불변식을 지키고, 나머지 프로세스는 **standby** 상태가 된다.
+
+| 상황 | 이전 | 지금 |
+| --- | --- | --- |
+| 두 번째 pi 시작 | `discord failed to start: another pi process already holds this Discord bot (pid 86946 on gram15 (held for 0m)); Discord allows only one gateway session per bot token` (165자, error) | `discord: standby — pid 86946 on gram15 owns this bot` (52자, warning) |
+| 푸터 상태 | `bot-connect: discord` (실행 중인 것처럼) | `bot-connect: standby (discord)` |
+| `/connect doctor` | `error` | `standby` + `retrying every 15s` (healthy 판정은 그대로) |
+| 다른 프로세스가 종료 | 다시 시작할 때까지 원격 제어 불가 | 최대 15초 안에 자동 인수(`discord: took over from the previous pi process`) |
+
+동작 규칙:
+
+- 인수 재시도는 **락 보유(`standby`)에만** 적용된다. 잘못된 토큰 같은 오류는 재시도하지 않는다(같은 실패를 반복할 뿐이다).
+- 재시도 중에는 알림을 다시 보내지 않는다. 소음이 목적이 아니다.
+- 실패한 재시도는 계속 standby로 남고, 인수에 성공하면 상태가 `running`으로 바뀌며 푸터가 갱신된다 (`host.onTransportStateChange`).
+- 상태 파일은 프로세스끼리 공유된다. 쓰기 직전에 파일을 다시 읽어 **다른 세션**의 더 새로운 상태만 채택하므로, 두 번째 프로세스의 쓰기가 첫 번째의 페어링을 지우지 않는다 (I46).
+
 ---
 
 ## 8. 보안 모델
@@ -335,3 +360,4 @@ const decision = decidePairing({ ..., now: 10, random: digitSequence("987654") }
 - **진행 상황은 턴당 1회로 합쳐서** 보낸다. 툴 호출마다 보내면 레이트리밋에 걸린다 (`index.ts` 참조).
 - **툴 이름만 전송**한다. 인자/출력은 절대 보내지 않는다.
 - **`sendUserMessage`는 스트리밍 중 `deliverAs` 없이 호출하면 throw**한다. 어댑터에 레이스 가드를 두었다.
+- **standby 재시도 타이머는 `unref()`한다.** 인수 대기 때문에 pi 프로세스가 살아남으면 안 된다. 브리지가 멈추면 타이머도 취소된다.

@@ -24,6 +24,7 @@ import type { DigestFileChange } from "./core/digest.js";
 import type { DigestTodo } from "./core/digest.js";
 import { extractAssistantText, extractToolText, summarize } from "./core/message.js";
 import { formatChallengeCode } from "./core/pairing.js";
+import { formatDoctorReport, formatStatusLabel, formatStatusReport, type TransportStatusEntry } from "./core/status.js";
 import { formatVersionReport, parsePackageMeta, VERSION_UNAVAILABLE_NOTICE, type PackageMeta } from "./core/version.js";
 import { toolEndLabel, toolStartLabel } from "./core/progress.js";
 import { extractMarkdownTodos } from "./core/todo.js";
@@ -267,6 +268,11 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 		notify(text, level) {
 			sessionCtx?.ui.notify(`[${COMMAND_KEY}] ${text}`, level ?? "info");
 		},
+		// A standby transport can become the live one long after startup, so the
+		// footer has to follow the state instead of freezing the first snapshot.
+		onTransportStateChange() {
+			sessionCtx?.ui.setStatus(COMMAND_KEY, statusLabel());
+		},
 		// The host can hand base64 image content to the model. Whether a specific
 		// transport can produce the bytes is decided per message by the bridge.
 		acceptsAttachments: true,
@@ -281,10 +287,19 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 		logger,
 	};
 
+	/** Transport state in the shape `core/status.ts` renders. */
+	function transportStatusEntries(): TransportStatusEntry[] {
+		if (!bridge) return [];
+		return bridge.diagnostics().map((entry) => ({
+			id: entry.id,
+			status: entry.status,
+			...(entry.detail === undefined ? {} : { detail: entry.detail }),
+		}));
+	}
+
 	function statusLabel(): string {
 		if (!bridge) return `${COMMAND_KEY}: off`;
-		const ids = bridge.transportIds;
-		return ids.length > 0 ? `${COMMAND_KEY}: ${ids.join(",")}` : `${COMMAND_KEY}: no transports`;
+		return formatStatusLabel({ label: COMMAND_KEY, transports: transportStatusEntries() });
 	}
 
 	function versionLine(): string {
@@ -306,52 +321,33 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 	function renderStatus(): string {
 		if (!bridge) return `${COMMAND_KEY}: no active session.`;
 		const snapshot = bridge.snapshot();
-		const lines = [
-			`${COMMAND_KEY} status`,
-			versionLine(),
-			`- transports: ${snapshot.transports.length > 0 ? snapshot.transports.join(", ") : "(none configured)"}`,
-			`- paired chats: ${snapshot.trusted.length}`,
-			`- conversations: ${snapshot.conversations}`,
-			`- paused: ${snapshot.paused.length > 0 ? snapshot.paused.join(", ") : "none"}`,
-			`- pending codes: ${snapshot.pending.length}`,
-		];
-		const factories = listTransportFactories();
-		if (snapshot.transports.length === 0 && factories.length > 0) {
-			const available = factories.map((factory) => factory.id).join(", ");
-			lines.push("", `Available transports: ${available}. Configure one under "transports" in the config file.`);
-		}
-		lines.push("", `Local commands: /${localCommand} status|doctor|version|pair|digest|pause|resume|disconnect|config`);
-		return lines.join("\n");
+		return formatStatusReport({
+			label: COMMAND_KEY,
+			extensionLine: versionLine(),
+			transports: transportStatusEntries(),
+			availableTransports: listTransportFactories().map((factory) => factory.id),
+			trusted: snapshot.trusted.length,
+			conversations: snapshot.conversations,
+			paused: snapshot.paused,
+			pending: snapshot.pending.length,
+			localCommand,
+		});
 	}
 
 	function renderDoctor(): { text: string; healthy: boolean } {
-		const lines = [`${COMMAND_KEY} doctor`, versionLine()];
 		if (!bridge) return { text: `${COMMAND_KEY}: no active session.`, healthy: false };
-
-		const diagnostics = bridge.diagnostics();
-		if (diagnostics.length === 0) lines.push("- transports: none registered");
-		for (const entry of diagnostics) {
-			lines.push(`- ${entry.id}: ${entry.status}${entry.detail === undefined ? "" : ` — ${entry.detail}`}`);
-		}
-
-		lines.push(`- session key: ${currentSessionKey}`);
-		lines.push(`- state file: ${statePath()} (${store ? "persistent" : "in-memory"})`);
-
 		const snapshot = bridge.snapshot();
-		lines.push(`- paired chats: ${snapshot.trusted.length}`);
-		lines.push(`- broadcast targets: ${snapshot.conversations}`);
-		lines.push(`- pending codes: ${snapshot.pending.length}`);
-
-		lines.push(
-			"",
-			"If a transport is not working, check in this order:",
-			"1. credential present in the environment (never in the config file)",
-			"2. bot invited/installed where you are talking to it",
-			"3. privileged intents or message scopes enabled in the platform app settings",
-			"4. no other pi process holds the same bot credential",
-		);
-
-		return { text: lines.join("\n"), healthy: !diagnostics.some((entry) => entry.status === "error") };
+		return formatDoctorReport({
+			label: COMMAND_KEY,
+			extensionLine: versionLine(),
+			transports: transportStatusEntries(),
+			sessionKey: currentSessionKey,
+			stateFile: statePath(),
+			persistent: store !== null,
+			trusted: snapshot.trusted.length,
+			conversations: snapshot.conversations,
+			pending: snapshot.pending.length,
+		});
 	}
 
 	async function buildDigest(ctx: ExtensionContext): Promise<string> {

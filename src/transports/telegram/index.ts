@@ -7,7 +7,7 @@
  */
 
 import { join } from "node:path";
-import { acquireLock, describeHolder, type LockHandle } from "../../lock.js";
+import { acquireLock, LockHeldError, type LockHandle } from "../../lock.js";
 import type {
 	Envelope,
 	EnvelopeHandler,
@@ -110,16 +110,13 @@ export class TelegramTransport implements Transport {
 		this.botId = me.id;
 		this.botUsername = me.username;
 
+		const lockPath = join(this.options.lockDir, `telegram-${me.id}.lock`);
 		const acquired = await acquireLock({
-			path: join(this.options.lockDir, `telegram-${me.id}.lock`),
+			path: lockPath,
 			logger: this.options.logger,
 			...(this.options.lockStaleMs === undefined ? {} : { staleMs: this.options.lockStaleMs }),
 		});
-		if (!acquired.ok) {
-			throw new Error(
-				`another pi process already polls this Telegram bot (${describeHolder(acquired.holder)}); Telegram allows only one getUpdates consumer`,
-			);
-		}
+		if (!acquired.ok) throw new LockHeldError(lockPath, acquired.holder);
 		this.lock = acquired.lock;
 		this.handler = handler;
 		this.stopped = false;

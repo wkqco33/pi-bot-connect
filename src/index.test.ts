@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import botConnect from "./index.js";
+import { acquireLock } from "./lock.js";
 
 interface FakeUi {
 	notify(text: string, level?: string): void;
@@ -394,6 +395,79 @@ describe("adapter — doctor", () => {
 		await pi.run("doctor", ctx);
 		expect(ctx.lastNotification).toContain("privileged intents");
 		expect(ctx.lastNotification).toContain("no other pi process");
+	});
+});
+
+describe("adapter — multi-instance standby", () => {
+	/** The adapter puts port locks under `<state dir>/locks`. */
+	function heldLock(): string {
+		return join(dir, "locks", "robo_claw-50052.lock");
+	}
+
+	function roboClawConfig(): unknown {
+		return { transports: { robo_claw: { enabled: true, port: 50052, host: "127.0.0.1" } } };
+	}
+
+	it("reports a bot owned by another pi process as standby, not as a failure", async () => {
+		const held = await acquireLock({ path: heldLock(), pid: process.pid });
+		expect(held.ok).toBe(true);
+		try {
+			const { ctx } = await start(roboClawConfig());
+			const notice = ctx.notifications.find((entry) => entry.text.includes("standby"));
+			expect(notice?.text).toContain("robo_claw: standby — pid");
+			expect(ctx.notifications.some((entry) => entry.text.includes("failed to start"))).toBe(false);
+		} finally {
+			if (held.ok) await held.lock.release();
+		}
+	});
+
+	it("warns instead of erroring while standing by", async () => {
+		const held = await acquireLock({ path: heldLock(), pid: process.pid });
+		expect(held.ok).toBe(true);
+		try {
+			const { ctx } = await start(roboClawConfig());
+			const notice = ctx.notifications.find((entry) => entry.text.includes("standby"));
+			expect(notice?.level).toBe("warning");
+		} finally {
+			if (held.ok) await held.lock.release();
+		}
+	});
+
+	it("shows standby in the footer instead of listing the transport as running", async () => {
+		const held = await acquireLock({ path: heldLock(), pid: process.pid });
+		expect(held.ok).toBe(true);
+		try {
+			const { ctx } = await start(roboClawConfig());
+			expect(ctx.statuses.get("bot-connect")).toBe("bot-connect: standby (robo_claw)");
+		} finally {
+			if (held.ok) await held.lock.release();
+		}
+	});
+
+	it("explains the standby state in doctor without calling it broken", async () => {
+		const held = await acquireLock({ path: heldLock(), pid: process.pid });
+		expect(held.ok).toBe(true);
+		try {
+			const { pi, ctx } = await start(roboClawConfig());
+			await pi.run("doctor", ctx);
+			expect(ctx.lastNotification).toContain("robo_claw: standby — pid");
+			expect(ctx.lastNotification).toContain("retrying every 15s");
+			expect(ctx.notifications.at(-1)?.level).toBe("info");
+		} finally {
+			if (held.ok) await held.lock.release();
+		}
+	});
+
+	it("shows the standby state in the status report", async () => {
+		const held = await acquireLock({ path: heldLock(), pid: process.pid });
+		expect(held.ok).toBe(true);
+		try {
+			const { pi, ctx } = await start(roboClawConfig());
+			await pi.run("status", ctx);
+			expect(ctx.lastNotification).toContain("- transports: robo_claw (standby");
+		} finally {
+			if (held.ok) await held.lock.release();
+		}
 	});
 });
 

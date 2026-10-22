@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Envelope } from "../../core/types.js";
-import { acquireLock } from "../../lock.js";
+import { acquireLock, LockHeldError } from "../../lock.js";
 import { TelegramTransport, type TelegramTransportOptions } from "./index.js";
 import { FakeTelegramRest } from "./doubles.js";
 import type { TelegramUpdate } from "./normalize.js";
@@ -95,7 +95,9 @@ describe("TelegramTransport — startup", () => {
 		expect(held.ok).toBe(true);
 
 		const h = setup();
-		await expect(h.transport.start(() => {})).rejects.toThrow(/already polls this Telegram bot/);
+		const failure = await h.transport.start(() => {}).catch((error: unknown) => error);
+		expect(failure).toBeInstanceOf(LockHeldError);
+		expect((failure as LockHeldError).holder?.pid).toBe(process.pid);
 	});
 
 	it("releases the lock when the initial poll fails", async () => {

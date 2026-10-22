@@ -39,6 +39,27 @@ export type AcquireResult =
 	| { readonly ok: true; readonly lock: LockHandle }
 	| { readonly ok: false; readonly reason: "held"; readonly holder: LockInfo | null };
 
+/**
+ * Raised by a transport that lost the race for a bot credential.
+ *
+ * It carries the holder instead of a paragraph of prose, so the bridge (which
+ * never imports this module) can decide how to tell the operator. `name` is the
+ * contract the core classifies on: see `core/start-failure.ts`.
+ */
+export class LockHeldError extends Error {
+	readonly holder: LockInfo | null;
+	/** Kept for diagnostics only: it names the credential's bot id. */
+	readonly lockPath: string;
+
+	constructor(path: string, holder: LockInfo | null) {
+		// The lock path is deliberately absent from the message.
+		super(`lock held by ${describeHolder(holder)}`);
+		this.name = "LockHeldError";
+		this.holder = holder;
+		this.lockPath = path;
+	}
+}
+
 export interface AcquireOptions {
 	readonly path: string;
 	/** A lock older than this is reclaimed even if the pid looks alive. */

@@ -30,6 +30,8 @@ class FakeHost implements BridgeHost {
 	acceptsAttachments = false;
 	readonly prompts: Array<{ text: string; deliverAs?: "steer" | "followUp"; images?: readonly PromptImage[] }> = [];
 	readonly notifications: string[] = [];
+	/** Level per `notifications` entry, in the same order. */
+	readonly notificationLevels: string[] = [];
 	aborts = 0;
 	idle = true;
 	clock = 1_000;
@@ -52,8 +54,16 @@ class FakeHost implements BridgeHost {
 		return this.idle;
 	}
 
-	notify(text: string): void {
+	notify(text: string, level?: "info" | "warning" | "error"): void {
 		this.notifications.push(text);
+		this.notificationLevels.push(level ?? "info");
+	}
+
+	/** Transport ids whose state changed after startup. */
+	readonly stateChanges: string[] = [];
+
+	onTransportStateChange(transportId: string): void {
+		this.stateChanges.push(transportId);
 	}
 
 	now(): number {
@@ -939,5 +949,229 @@ describe("Bridge — snapshot", () => {
 		expect(snapshot.paused).toEqual(["fake:conv-1"]);
 		expect(snapshot.pending).toEqual([]);
 		expect(snapshot.conversations).toBe(1);
+	});
+});
+
+/**
+ * Two pi processes in two terminals is normal. The second one cannot own the
+ * bot credential, and that is not a failure: it is standby, and it takes over
+ * when the first process lets go.
+ */
+describe("Bridge — multi-instance standby", () => {
+	/** Holds the credential until `released` flips, then starts for real. */
+	class ContendedTransport implements Transport {
+		readonly id = "discord";
+		readonly capabilities = FAKE_CAPABILITIES;
+		started = false;
+		attempts = 0;
+		released = false;
+		/** Set to change how the next start attempt fails. */
+		failWith: unknown = null;
+		/** When set, a successful start waits for it (to model a slow takeover). */
+		gate: Promise<void> | null = null;
+		stopCalls = 0;
+
+		async start(): Promise<void> {
+			this.attempts++;
+			if (this.released && this.failWith === null) {
+				if (this.gate !== null) await this.gate;
+				this.started = true;
+				return;
+			}
+			const error = new Error("lock held by pid 86946 on gram15 (held for 0m)");
+			error.name = "LockHeldError";
+			Object.assign(error, { holder: { pid: 86946, host: "gram15" } });
+			return Promise.reject(this.failWith ?? error);
+		}
+
+		async stop(): Promise<void> {
+			this.stopCalls++;
+			this.started = false;
+		}
+
+		send(): Promise<SendReceipt> {
+			return Promise.resolve({ messageId: "1" });
+		}
+	}
+
+	function flush(): Promise<void> {
+		return new Promise((resolve) => setImmediate(resolve));
+	}
+
+	interface RetryHarness {
+		readonly bridge: Bridge;
+		readonly host: FakeHost;
+		readonly transport: ContendedTransport;
+		/** Fires every timer the bridge scheduled, in order. */
+		readonly timers: Array<() => void>;
+		/** Cancellation calls made by the bridge. */
+		readonly cancelled: number[];
+		readonly delays: number[];
+	}
+
+	async function setupRetry(): Promise<RetryHarness> {
+		const host = new FakeHost();
+		const timers: Array<() => void> = [];
+		const cancelled: number[] = [];
+		const delays: number[] = [];
+		let sequence = 0;
+		const bridge = new Bridge({
+			host,
+			standbyRetryMs: 15_000,
+			standbyTimer: (run, delayMs) => {
+				const id = sequence++;
+				timers.push(run);
+				delays.push(delayMs);
+				return () => cancelled.push(id);
+			},
+		});
+		const transport = new ContendedTransport();
+		await bridge.register(transport);
+		return { bridge, host, transport, timers, cancelled, delays };
+	}
+
+	it("calls a held credential standby instead of a start failure", async () => {
+		const { host } = await setupRetry();
+		expect(host.notifications.join("\n")).toContain(
+			"discord: standby — pid 86946 on gram15 owns this bot",
+		);
+	});
+
+	it("does not shout: a held credential is a warning, not an error", async () => {
+		const { host } = await setupRetry();
+		expect(host.notificationLevels).toEqual(["warning"]);
+	});
+
+	it("keeps the standby notice to one short line", async () => {
+		const { host } = await setupRetry();
+		const notice = host.notifications[0] ?? "";
+		expect(notice).not.toContain("\n");
+		expect(notice.length).toBeLessThanOrEqual(80);
+	});
+
+	it("reports standby in diagnostics, not running", async () => {
+		const { bridge } = await setupRetry();
+		expect(bridge.diagnostics()).toEqual([
+			{ id: "discord", status: "standby", detail: "pid 86946 on gram15 owns this bot; retrying every 15s" },
+		]);
+	});
+
+	it("keeps a standby transport out of the running list", async () => {
+		const { bridge } = await setupRetry();
+		expect(bridge.runningTransportIds).toEqual([]);
+	});
+
+	it("schedules a takeover attempt at the configured cadence", async () => {
+		const { delays, timers } = await setupRetry();
+		expect(delays).toEqual([15_000]);
+		expect(timers).toHaveLength(1);
+	});
+
+	it("does not schedule a retry for a credential that is simply wrong", async () => {
+		const host = new FakeHost();
+		const timers: Array<() => void> = [];
+		const bridge = new Bridge({
+			host,
+			standbyTimer: (run) => {
+				timers.push(run);
+				return () => undefined;
+			},
+		});
+		await bridge.register(new FailingTransport("bad token"));
+
+		expect(timers).toHaveLength(0);
+		expect(host.notificationLevels).toEqual(["error"]);
+	});
+
+	it("takes the bot over when the other process releases it", async () => {
+		const { bridge, host, transport } = await setupRetry();
+		transport.released = true;
+
+		await bridge.retryStandby();
+
+		expect(transport.started).toBe(true);
+		expect(bridge.diagnostics()).toEqual([{ id: "discord", status: "running" }]);
+		expect(bridge.runningTransportIds).toEqual(["discord"]);
+		expect(host.notifications.at(-1)).toBe("discord: took over from the previous pi process");
+	});
+
+	it("tells the host so the footer stops saying standby", async () => {
+		const { bridge, host, transport } = await setupRetry();
+		transport.released = true;
+
+		await bridge.retryStandby();
+
+		expect(host.stateChanges).toEqual(["discord"]);
+	});
+
+	it("takes over on the scheduled timer, not only by hand", async () => {
+		const { transport, timers } = await setupRetry();
+		transport.released = true;
+
+		timers[0]?.();
+		await flush();
+
+		expect(transport.started).toBe(true);
+	});
+
+	it("does not re-notify on every failed retry", async () => {
+		const { bridge, host } = await setupRetry();
+		const before = host.notifications.length;
+		await bridge.retryStandby();
+		await bridge.retryStandby();
+		expect(host.notifications.length).toBe(before);
+	});
+
+	it("keeps retrying after a failed takeover", async () => {
+		const { bridge, transport, timers } = await setupRetry();
+		await bridge.retryStandby();
+		expect(transport.attempts).toBe(2);
+		expect(timers).toHaveLength(2);
+	});
+
+	it("reports an error when the credential is ours but the start still fails", async () => {
+		const { bridge, host, transport } = await setupRetry();
+		transport.failWith = new Error("discord gateway rejected the token");
+
+		await bridge.retryStandby();
+
+		expect(bridge.diagnostics()).toEqual([
+			{ id: "discord", status: "error", detail: "discord gateway rejected the token" },
+		]);
+		expect(host.notificationLevels.at(-1)).toBe("error");
+		expect(host.notifications.at(-1)).toBe("discord failed to start: discord gateway rejected the token");
+	});
+
+	it("stops scheduling takeover attempts once the bridge stops", async () => {
+		const { bridge, cancelled, timers } = await setupRetry();
+		await bridge.stop();
+		expect(cancelled).toEqual([0]);
+		expect(timers).toHaveLength(1);
+	});
+
+	it("gives the credential back when shutdown races a takeover", async () => {
+		const { bridge, transport } = await setupRetry();
+		let release: () => void = () => undefined;
+		transport.gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		transport.released = true;
+
+		const takeover = bridge.retryStandby();
+		await bridge.stop();
+		release();
+		await takeover;
+
+		// The session is gone, so nothing may keep the bot (or its lock) alive.
+		expect(transport.started).toBe(false);
+		expect(transport.stopCalls).toBeGreaterThanOrEqual(2);
+	});
+
+	it("does not start a standby transport after the bridge stopped", async () => {
+		const { bridge, transport } = await setupRetry();
+		transport.released = true;
+		await bridge.stop();
+		await bridge.retryStandby();
+		expect(transport.started).toBe(false);
 	});
 });

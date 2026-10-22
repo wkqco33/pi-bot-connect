@@ -27,6 +27,14 @@ import { takeToken, type RateLimitBucket, type RateLimitPolicy } from "./core/ra
 import { redactWithReport } from "./core/redact.js";
 import { route, type UnsupportedFeature } from "./core/router.js";
 import {
+	classifyStartFailure,
+	standbyDetail,
+	standbyNotice,
+	startFailureNotice,
+	takeoverNotice,
+	type LockHolder,
+} from "./core/start-failure.js";
+import {
 	conversationKey,
 	identityKey,
 	resolveConfig,
@@ -146,6 +154,8 @@ export interface BridgeHost {
 	abort(): void;
 	isIdle(): boolean;
 	notify(text: string, level?: "info" | "warning" | "error"): void;
+	/** Called when a transport changes state after startup (standby -> running). */
+	onTransportStateChange?(transportId: TransportId): void;
 	/** False until the host can forward attachment bytes to the model. */
 	readonly acceptsAttachments: boolean;
 	readonly cwd: string;
@@ -163,10 +173,30 @@ const UNSUPPORTED_NOTICES: Record<UnsupportedFeature, string> = {
 	"attachment-too-many": ATTACHMENT_TOO_MANY_NOTICE,
 };
 
+/** Injected timer, so tests decide when a takeover attempt happens. */
+export type StandbyTimer = (run: () => void, delayMs: number) => () => void;
+
+/** A second terminal waits this long before trying the credential again. */
+export const DEFAULT_STANDBY_RETRY_MS = 15_000;
+
+/**
+ * `setTimeout` with an `unref`ed handle: a pending takeover attempt must never
+ * be the reason a pi process stays alive.
+ */
+function systemStandbyTimer(run: () => void, delayMs: number): () => void {
+	const timer = setTimeout(run, delayMs);
+	if (typeof timer === "object" && timer !== null && "unref" in timer) timer.unref();
+	return () => clearTimeout(timer);
+}
+
 export interface BridgeOptions {
 	readonly host: BridgeHost;
 	readonly config?: Partial<BridgeConfig>;
 	readonly store?: BridgeStore;
+	/** Takeover retry cadence for standby transports. */
+	readonly standbyRetryMs?: number;
+	/** Injected in tests. Defaults to an unref'ed `setTimeout`. */
+	readonly standbyTimer?: StandbyTimer;
 }
 
 export class Bridge {
@@ -176,6 +206,15 @@ export class Bridge {
 	private readonly host: BridgeHost;
 	private readonly transports = new Map<TransportId, Transport>();
 	private readonly startErrors = new Map<TransportId, string>();
+	/**
+	 * Transports whose credential another pi process legitimately holds. Not an
+	 * error: this session takes the bot over when that process lets go.
+	 */
+	private readonly standby = new Map<TransportId, LockHolder | null>();
+	private readonly standbyRetryMs: number;
+	private readonly standbyTimer: StandbyTimer;
+	private cancelStandbyRetry: (() => void) | null = null;
+	private stopped = false;
 	/** Conversation key to the message id of the current turn's progress card. */
 	private readonly progressKeys = new Map<string, string>();
 	/** Per-identity token buckets for remote input. */
@@ -188,6 +227,8 @@ export class Bridge {
 		this.host = options.host;
 		this.config = resolveConfig(options.config);
 		this.store = options.store ?? new MemoryBridgeStore();
+		this.standbyRetryMs = options.standbyRetryMs ?? DEFAULT_STANDBY_RETRY_MS;
+		this.standbyTimer = options.standbyTimer ?? systemStandbyTimer;
 	}
 
 	/** Registers and starts a transport. */
@@ -203,35 +244,123 @@ export class Bridge {
 			throw new Error(`Transport '${transport.id}' is already registered`);
 		}
 		this.transports.set(transport.id, transport);
+		this.stopped = false;
+		await this.startTransport(transport);
+		this.scheduleStandbyRetry();
+	}
+
+	/**
+	 * Starts one transport, recording (never throwing) how it ended.
+	 *
+	 * `quiet` is used by the takeover retry: a credential that is still owned
+	 * elsewhere must not re-notify on every attempt.
+	 */
+	private async startTransport(transport: Transport, options: { quiet?: boolean } = {}): Promise<boolean> {
 		try {
 			await transport.start((envelope) => this.onEnvelope(envelope));
 			this.startErrors.delete(transport.id);
+			this.standby.delete(transport.id);
 			this.host.logger.info("transport started", { transport: transport.id });
+			return true;
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			this.startErrors.set(transport.id, message);
-			this.host.logger.error("transport failed to start", { transport: transport.id, error: message });
-			this.host.notify(`${transport.id} failed to start: ${message}`, "error");
+			const failure = classifyStartFailure(error);
+			if (failure.kind === "standby") {
+				// The bot is not broken, it is simply owned elsewhere. Say that in one
+				// short line instead of an error wall, and wait for the lock.
+				this.standby.set(transport.id, failure.holder);
+				this.startErrors.delete(transport.id);
+				if (options.quiet === true) {
+					this.host.logger.debug("still standing by", { transport: transport.id });
+					return false;
+				}
+				this.host.logger.warn("transport standing by: another process owns this credential", {
+					transport: transport.id,
+					holderPid: failure.holder?.pid,
+				});
+				this.host.notify(standbyNotice(transport.id, failure.holder), "warning");
+				return false;
+			}
+
+			this.standby.delete(transport.id);
+			this.startErrors.set(transport.id, failure.detail);
+			this.host.logger.error("transport failed to start", { transport: transport.id, error: failure.detail });
+			this.host.notify(startFailureNotice(transport.id, failure.detail), "error");
+			return false;
 		}
 	}
 
-	async stop(): Promise<void> {
-		for (const transport of this.transports.values()) {
-			try {
-				await transport.stop();
-			} catch (error) {
-				this.host.logger.warn("transport failed to stop", {
-					transport: transport.id,
-					error: error instanceof Error ? error.message : String(error),
-				});
+	/**
+	 * Tries the standby credentials again. Called on a timer and exposed so the
+	 * wiring test does not have to wait for wall-clock time.
+	 */
+	async retryStandby(): Promise<void> {
+		if (this.stopped) return;
+		this.cancelStandbyRetry?.();
+		this.cancelStandbyRetry = null;
+
+		for (const id of [...this.standby.keys()]) {
+			const transport = this.transports.get(id);
+			if (transport === undefined) {
+				this.standby.delete(id);
+				continue;
 			}
+			const started = await this.startTransport(transport, { quiet: true });
+			if (this.stopped) {
+				// Shutdown happened while `start()` was in flight.
+				await this.stopTransport(transport);
+				return;
+			}
+			if (started) this.host.notify(takeoverNotice(id), "info");
+			// Either the credential is ours now or starting it failed for another
+			// reason; both mean the footer must stop saying standby.
+			if (started || this.startErrors.has(id)) this.host.onTransportStateChange?.(id);
+		}
+
+		this.scheduleStandbyRetry();
+	}
+
+	private scheduleStandbyRetry(): void {
+		this.cancelStandbyRetry?.();
+		this.cancelStandbyRetry = null;
+		if (this.stopped || this.standby.size === 0) return;
+		this.cancelStandbyRetry = this.standbyTimer(() => {
+			this.cancelStandbyRetry = null;
+			void this.retryStandby();
+		}, this.standbyRetryMs);
+	}
+
+	async stop(): Promise<void> {
+		this.stopped = true;
+		this.cancelStandbyRetry?.();
+		this.cancelStandbyRetry = null;
+		for (const transport of this.transports.values()) {
+			await this.stopTransport(transport);
 		}
 		this.transports.clear();
+	}
+
+	/**
+	 * A takeover can be in flight when the session shuts down. Stopping again
+	 * after it lands is what keeps a freshly earned lock off the disk.
+	 */
+	private async stopTransport(transport: Transport): Promise<void> {
+		try {
+			await transport.stop();
+		} catch (error) {
+			this.host.logger.warn("transport failed to stop", {
+				transport: transport.id,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
 	}
 
 	/** Health view for `/connect doctor`. Never contains secrets. */
 	diagnostics(): readonly TransportDiagnostics[] {
 		return [...this.transports.values()].map((transport) => {
+			if (this.standby.has(transport.id)) {
+				const holder = this.standby.get(transport.id) ?? null;
+				return { id: transport.id, status: "standby", detail: standbyDetail(holder, this.standbyRetryMs) };
+			}
 			const error = this.startErrors.get(transport.id);
 			const detail = error ?? transport.diagnose?.();
 			return {
@@ -244,6 +373,11 @@ export class Bridge {
 
 	get transportIds(): readonly TransportId[] {
 		return [...this.transports.keys()];
+	}
+
+	/** Transports that actually receive messages in this process. */
+	get runningTransportIds(): readonly TransportId[] {
+		return [...this.transports.keys()].filter((id) => !this.standby.has(id) && !this.startErrors.has(id));
 	}
 
 	async onEnvelope(envelope: Envelope): Promise<void> {

@@ -269,7 +269,37 @@ export class FileBridgeStore implements BridgeStore {
 		}
 	}
 
+	/**
+	 * Two pi processes share one file. Loading once is not enough: the other
+	 * process may pair after this one loaded, and a blind rewrite would erase it.
+	 * Foreign sessions are adopted when the file's copy is newer; this session's
+	 * own state always stays authoritative (last writer wins per session).
+	 */
+	private async mergeForeignSessions(): Promise<void> {
+		let raw: string;
+		try {
+			raw = await readFile(this.path, "utf8");
+		} catch {
+			return;
+		}
+
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(raw) as unknown;
+		} catch (error) {
+			this.logger.warn("store file is not valid JSON, writing this session only", { error: String(error) });
+			return;
+		}
+
+		for (const [sessionId, state] of Object.entries(parseStoreSnapshot(parsed).snapshot.sessions)) {
+			if (sessionId === this.sessionId) continue;
+			const mine = this.all[sessionId];
+			if (mine === undefined || state.updatedAt > mine.updatedAt) this.all[sessionId] = state;
+		}
+	}
+
 	private async writeOnce(): Promise<void> {
+		await this.mergeForeignSessions();
 		this.prune();
 		const snapshot: StoreSnapshot = { version: STORE_VERSION, sessions: this.all };
 		const data = `${JSON.stringify(snapshot, null, "\t")}\n`;

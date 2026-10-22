@@ -9,6 +9,22 @@
 
 ## [Unreleased]
 
+### Added
+
+- **여러 pi 프로세스 동시 실행 지원 (standby + 자동 인수)** — 다른 프로세스가 보유한 봇 자격증명은 실패가 아니라 `standby`로 분류된다. 알림은 한 줄 경고(`discord: standby — pid 86946 on gram15 owns this bot`), 푸터는 `bot-connect: standby (discord)`, `/connect doctor`는 `standby`와 재시도 주기를 표시한다. 먼저 띄운 프로세스가 종료되면 최대 15초 안에 자동으로 인수한다
+- `LockHeldError` — 락 보유를 타입으로 표현한다. 어댑터는 165자 오류 문단 대신 holder(pid/host)를 넘긴다
+- `core/status.ts` — 푸터 라벨·`/connect status`·`/connect doctor` 렌더링을 코어로 옮겼다 (`src/index.ts`는 데이터만 모은다)
+- `core/start-failure.ts` — 시작 실패를 standby/오류로 분류하고, 알림을 리댁션 + 공백 정규화 + 160자 상한으로 만든다
+
+### Changed
+
+- 전송 시작 실패 알림은 길이 상한과 리댁션을 거친다. 스택 트레이스나 URL에 섞인 토큰이 TUI로 새지 않는다
+- 상태 파일에 여러 프로세스가 쓸 때, 쓰기 직전 파일을 다시 읽어 더 새로운 **다른 세션**만 채택한다. 자기 세션은 메모리가 정본이다 (다른 세션의 페어링 유실 방지)
+
+### Fixed
+
+- Telegram 봇 토큰 리댁션이 `https://api.telegram.org/bot<token>/...` 형태(가장 흔한 유출 경로)를 놓치던 문제
+
 ### Planned
 
 - Slack 전송 (Socket Mode, mrkdwn, 4000자). conformance harness 1개 + 팩토리 등록이면 된다
