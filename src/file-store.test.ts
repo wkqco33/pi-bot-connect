@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -129,6 +129,25 @@ describe("parseStoreSnapshot", () => {
 });
 
 describe("FileBridgeStore — durability", () => {
+	it("reports a write failure without exposing the error or repeating it", async () => {
+		const status: boolean[] = [];
+		const store = await open({ path, sessionId: "s1", onPersistenceChange: (healthy) => status.push(healthy) });
+		await store.flush();
+		await rename(path, join(dir, "saved-state.json"));
+		await mkdir(path);
+		store.trust("discord:42", 10);
+		await store.flush();
+		store.trust("discord:43", 11);
+		await store.flush();
+		expect(status).toEqual([false]);
+		expect(store.writeFailed).toBe(true);
+		await rename(path, join(dir, "blocked-directory"));
+		store.trust("discord:44", 12);
+		await store.flush();
+		expect(status).toEqual([false, true]);
+		expect(store.writeFailed).toBe(false);
+	});
+
 	it("writes the state file with owner-only permissions", async () => {
 		const store = await open({ path, sessionId: "s1" });
 		await store.flush();

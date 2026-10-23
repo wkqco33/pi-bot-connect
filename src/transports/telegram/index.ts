@@ -18,6 +18,7 @@ import type {
 	SendReceipt,
 	Transport,
 	TransportCapabilities,
+	TransportHealthHandler,
 } from "../../core/types.js";
 import { normalizeTelegramUpdate, TELEGRAM_TRANSPORT_ID, type TelegramUpdate } from "./normalize.js";
 import { TelegramRest, type TelegramApi } from "./rest.js";
@@ -100,7 +101,7 @@ export class TelegramTransport implements Transport {
 		this.now = options.now ?? Date.now;
 	}
 
-	async start(handler: EnvelopeHandler): Promise<void> {
+	async start(handler: EnvelopeHandler, onHealthChange?: TransportHealthHandler): Promise<void> {
 		if (this.handler !== null || this.loop !== null) throw new Error("Telegram transport is already started");
 
 		// Validates the token and gives us the bot id, which keeps the lock path
@@ -137,7 +138,7 @@ export class TelegramTransport implements Transport {
 			throw error;
 		}
 
-		this.loop = this.runLoop();
+		this.loop = this.runLoop(onHealthChange);
 	}
 
 	async stop(): Promise<void> {
@@ -230,14 +231,16 @@ export class TelegramTransport implements Transport {
 		return `https://api.telegram.org/file/bot${this.options.token}/${filePath}`;
 	}
 
-	private async runLoop(): Promise<void> {
+	private async runLoop(onHealthChange?: TransportHealthHandler): Promise<void> {
 		const backoff = DEFAULT_BACKOFF_MS;
 		let attempt = 0;
 
 		while (!this.stopped) {
 			try {
 				const updates = await this.rest.getUpdates(this.offset, this.pollTimeoutSeconds, this.abort?.signal);
+				if (attempt >= 3 && !this.stopped) onHealthChange?.("running");
 				attempt = 0;
+				this.error = null;
 				this.consume(updates);
 			} catch (error) {
 				if (this.stopped) break;
@@ -246,6 +249,7 @@ export class TelegramTransport implements Transport {
 				this.options.logger.warn("telegram poll failed", { error: message });
 				const delay = backoff[Math.min(attempt, backoff.length - 1)] ?? 20_000;
 				attempt++;
+				if (attempt === 3) onHealthChange?.("error");
 				await this.delayImpl(delay);
 			}
 		}

@@ -25,6 +25,8 @@ import type { DigestTodo } from "./core/digest.js";
 import { extractAssistantText, extractToolText, summarize } from "./core/message.js";
 import { formatChallengeCode } from "./core/pairing.js";
 import { formatDoctorReport, formatStatusLabel, formatStatusReport, type TransportStatusEntry } from "./core/status.js";
+import { consoleLogEnabled, summarizeStartupNotes } from "./core/operator-notices.js";
+import { boundFailureMessage } from "./core/start-failure.js";
 import { formatVersionReport, parsePackageMeta, VERSION_UNAVAILABLE_NOTICE, type PackageMeta } from "./core/version.js";
 import { toolEndLabel, toolStartLabel } from "./core/progress.js";
 import { extractMarkdownTodos } from "./core/todo.js";
@@ -45,13 +47,17 @@ const DEBUG = process.env.PI_BOT_CONNECT_DEBUG === "1" || process.env.PI_BOT_CON
 
 const logger: Logger = {
 	debug: (message, meta) => {
-		if (DEBUG) console.debug(`[${COMMAND_KEY}] ${message}`, meta ?? "");
+		if (consoleLogEnabled(DEBUG, "debug")) console.debug(`[${COMMAND_KEY}] ${message}`, meta ?? "");
 	},
 	info: (message, meta) => {
-		if (DEBUG) console.info(`[${COMMAND_KEY}] ${message}`, meta ?? "");
+		if (consoleLogEnabled(DEBUG, "info")) console.info(`[${COMMAND_KEY}] ${message}`, meta ?? "");
 	},
-	warn: (message, meta) => console.warn(`[${COMMAND_KEY}] ${message}`, meta ?? ""),
-	error: (message, meta) => console.error(`[${COMMAND_KEY}] ${message}`, meta ?? ""),
+	warn: (message, meta) => {
+		if (consoleLogEnabled(DEBUG, "warn")) console.warn(`[${COMMAND_KEY}] ${message}`, meta ?? "");
+	},
+	error: (message, meta) => {
+		if (consoleLogEnabled(DEBUG, "error")) console.error(`[${COMMAND_KEY}] ${message}`, meta ?? "");
+	},
 };
 
 // ---------------------------------------------------------------------------
@@ -228,6 +234,7 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 	let bridge: Bridge | null = null;
 	let store: FileBridgeStore | null = null;
 	let currentSessionKey = "ephemeral";
+	let startupNotes: string[] = [];
 	let sessionCtx: ExtensionContext | null = null;
 	let runningTool: string | undefined;
 	/** True for the duration of a turn that a messenger started (G1). */
@@ -256,7 +263,7 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 				pi.sendUserMessage(content);
 			} catch (error) {
 				logger.error("failed to inject remote prompt", { error: String(error) });
-				sessionCtx?.ui.notify(`[${COMMAND_KEY}] failed to inject prompt: ${String(error)}`, "error");
+				sessionCtx?.ui.notify(`[${COMMAND_KEY}] failed to inject prompt: ${boundFailureMessage(String(error))}`, "error");
 			}
 		},
 		abort() {
@@ -344,9 +351,11 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 			sessionKey: currentSessionKey,
 			stateFile: statePath(),
 			persistent: store !== null,
+			stateWriteFailed: store?.writeFailed === true,
 			trusted: snapshot.trusted.length,
 			conversations: snapshot.conversations,
 			pending: snapshot.pending.length,
+			startupNotes,
 		});
 	}
 
@@ -511,7 +520,12 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 		const notes = [...loaded.notes, ...created.errors];
 		let bridgeStore: BridgeStore;
 		try {
-			store = await FileBridgeStore.open({ path: statePath(), sessionId: currentSessionKey, logger });
+			store = await FileBridgeStore.open({
+				path: statePath(), sessionId: currentSessionKey, logger,
+				onPersistenceChange(healthy) {
+					if (!healthy) sessionCtx?.ui.notify(`[${COMMAND_KEY}] state could not be saved; run /connect doctor.`, "error");
+				},
+			});
 			bridgeStore = store;
 		} catch (error) {
 			store = null;
@@ -527,8 +541,8 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 
 		ctx.ui.setStatus(COMMAND_KEY, statusLabel());
 
-		if (created.skipped.length > 0) notes.push(`disabled transports: ${created.skipped.join(", ")}`);
-		if (notes.length > 0) ctx.ui.notify(`[${COMMAND_KEY}]\n${notes.join("\n")}`, "warning");
+		startupNotes = notes.map(boundFailureMessage);
+		if (startupNotes.length > 0) ctx.ui.notify(summarizeStartupNotes(startupNotes), "warning");
 	});
 
 	pi.on("session_shutdown", async () => {
@@ -546,6 +560,7 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 		lastAssistantText = "";
 		lastUserPrompt = "";
 		lastTodos = [];
+		startupNotes = [];
 	});
 
 	// --- session tracking for digest + progress -------------------------------

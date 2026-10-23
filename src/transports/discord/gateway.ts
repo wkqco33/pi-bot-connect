@@ -103,6 +103,7 @@ export type GatewayState = "idle" | "connecting" | "reconnecting" | "ready" | "e
 export interface GatewayHooks {
 	readonly onDispatch: (type: string, data: unknown) => void;
 	readonly log: Logger;
+	readonly onHealthChange?: (status: "running" | "error") => void;
 }
 
 export interface DiscordGatewayOptions {
@@ -259,6 +260,7 @@ export class DiscordGateway {
 		this.lastError = error.message;
 
 		const reject = this.rejectReady;
+		if (reject === null && !this.stopped) this.options.hooks.onHealthChange?.("error");
 		this.resolveReady = null;
 		this.rejectReady = null;
 		if (reject) reject(error);
@@ -353,6 +355,7 @@ export class DiscordGateway {
 		this.attempts = 0;
 		this.clearReadyTimer();
 		this.currentState = "ready";
+		if (this.resolveReady === null) this.options.hooks.onHealthChange?.("running");
 
 		const resolve = this.resolveReady;
 		this.resolveReady = null;
@@ -367,6 +370,7 @@ export class DiscordGateway {
 		this.attempts = 0;
 		this.clearReadyTimer();
 		this.currentState = "ready";
+		this.options.hooks.onHealthChange?.("running");
 		this.options.hooks.log.info("discord gateway resumed");
 	}
 

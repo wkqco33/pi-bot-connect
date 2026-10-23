@@ -20,6 +20,7 @@ import type {
 	SendReceipt,
 	Transport,
 	TransportCapabilities,
+	TransportHealthHandler,
 } from "../../core/types.js";
 import { DiscordGateway, systemScheduler, type GatewayScheduler, type SocketFactory } from "./gateway.js";
 import { DISCORD_DEFAULT_INTENTS, DISCORD_TRANSPORT_ID, normalizeDiscordMessage } from "./normalize.js";
@@ -109,7 +110,7 @@ export class DiscordTransport implements Transport {
 		this.now = options.now ?? Date.now;
 	}
 
-	async start(handler: EnvelopeHandler): Promise<void> {
+	async start(handler: EnvelopeHandler, onHealthChange?: TransportHealthHandler): Promise<void> {
 		if (this.handler !== null) throw new Error("Discord transport is already started");
 
 		// One REST call up front: it validates the token and gives us the bot id,
@@ -138,6 +139,7 @@ export class DiscordTransport implements Transport {
 			hooks: {
 				onDispatch: (type, data) => this.onDispatch(type, data),
 				log: this.options.logger,
+				...(onHealthChange === undefined ? {} : { onHealthChange }),
 			},
 		});
 

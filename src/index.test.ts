@@ -10,10 +10,10 @@
  * for its logic, that logic belongs in the core.
  */
 
-import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import botConnect from "./index.js";
 import { acquireLock } from "./lock.js";
 
@@ -276,15 +276,25 @@ describe("adapter — session lifecycle", () => {
 
 describe("adapter — config diagnostics", () => {
 	it("surfaces a config error to the user", async () => {
-		const { ctx } = await start({ bridge: { requirePairing: "yes" } });
+		const { pi, ctx } = await start({ bridge: { requirePairing: "yes" } });
 		const warning = ctx.notifications.find((entry) => entry.level === "warning");
-		expect(warning?.text).toContain("requirePairing");
+		expect(warning?.text).toContain("run /connect doctor");
+		expect(warning?.text).not.toContain("\n");
+		await pi.run("doctor", ctx);
+		expect(ctx.lastNotification).toContain("requirePairing");
 	});
 
 	it("surfaces invalid JSON with the file path", async () => {
-		const { ctx } = await start("not json at all{");
+		const { pi, ctx } = await start("not json at all{");
 		const warning = ctx.notifications.find((entry) => entry.level === "warning");
-		expect(warning?.text).toContain("invalid JSON");
+		expect(warning?.text).toContain("run /connect doctor");
+		await pi.run("doctor", ctx);
+		expect(ctx.lastNotification).toContain("invalid JSON");
+	});
+
+	it("does not warn when a transport is explicitly disabled", async () => {
+		const { ctx } = await start({ transports: { discord: { enabled: false } } });
+		expect(ctx.notifications.filter((entry) => entry.level === "warning")).toEqual([]);
 	});
 
 	it("stays quiet when no config file exists", async () => {
@@ -293,9 +303,11 @@ describe("adapter — config diagnostics", () => {
 	});
 
 	it("warns about unknown keys from the loaded config", async () => {
-		const { ctx } = await start({ bridge: { loki: true } });
+		const { pi, ctx } = await start({ bridge: { loki: true } });
 		const warning = ctx.notifications.find((entry) => entry.level === "warning");
-		expect(warning?.text).toContain("bridge.loki: unknown key");
+		expect(warning?.text).toContain("run /connect doctor");
+		await pi.run("doctor", ctx);
+		expect(ctx.lastNotification).toContain("bridge.loki: unknown key");
 	});
 });
 
@@ -398,6 +410,23 @@ describe("adapter — doctor", () => {
 	});
 });
 
+describe("adapter — persistence diagnostics", () => {
+	it("alerts once and marks doctor unhealthy after a background state write fails", async () => {
+		await writeFile(stateFile, JSON.stringify({ version: 1, sessions: { "session-a": { trusted: { "discord:42": 1 } } } }));
+		const { pi, ctx } = await start();
+		await vi.waitFor(async () => expect((await readFile(stateFile, "utf8")).startsWith("{\n")).toBe(true));
+		await rename(stateFile, join(dir, "saved-state.json"));
+		await mkdir(stateFile);
+		await pi.run("disconnect", ctx);
+		await vi.waitFor(() => expect(ctx.notifications.some((entry) => entry.text.includes("state could not be saved"))).toBe(true));
+		const warnings = ctx.notifications.filter((entry) => entry.text.includes("state could not be saved"));
+		expect(warnings).toHaveLength(1);
+		await pi.run("doctor", ctx);
+		expect(ctx.lastNotification).toContain("write failed");
+		expect(ctx.notifications.at(-1)?.level).toBe("warning");
+	});
+});
+
 describe("adapter — multi-instance standby", () => {
 	/** The adapter puts port locks under `<state dir>/locks`. */
 	function heldLock(): string {
@@ -413,21 +442,19 @@ describe("adapter — multi-instance standby", () => {
 		expect(held.ok).toBe(true);
 		try {
 			const { ctx } = await start(roboClawConfig());
-			const notice = ctx.notifications.find((entry) => entry.text.includes("standby"));
-			expect(notice?.text).toContain("robo_claw: standby — pid");
-			expect(ctx.notifications.some((entry) => entry.text.includes("failed to start"))).toBe(false);
+			expect(ctx.notifications.some((entry) => entry.text.includes("standby"))).toBe(false);
+			expect(ctx.statuses.get("bot-connect")).toBe("bot-connect: standby (robo_claw)");
 		} finally {
 			if (held.ok) await held.lock.release();
 		}
 	});
 
-	it("warns instead of erroring while standing by", async () => {
+	it("does not show a startup warning while standing by", async () => {
 		const held = await acquireLock({ path: heldLock(), pid: process.pid });
 		expect(held.ok).toBe(true);
 		try {
 			const { ctx } = await start(roboClawConfig());
-			const notice = ctx.notifications.find((entry) => entry.text.includes("standby"));
-			expect(notice?.level).toBe("warning");
+			expect(ctx.notifications).toEqual([]);
 		} finally {
 			if (held.ok) await held.lock.release();
 		}

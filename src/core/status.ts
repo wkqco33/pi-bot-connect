@@ -86,6 +86,8 @@ export function formatStatusReport(input: StatusReportInput): string {
 }
 
 export interface DoctorReportInput {
+	readonly startupNotes?: readonly string[];
+	readonly stateWriteFailed?: boolean;
 	readonly label: string;
 	readonly extensionLine: string;
 	readonly transports: readonly TransportStatusEntry[];
@@ -117,9 +119,13 @@ export function formatDoctorReport(input: DoctorReportInput): DoctorReport {
 		}
 	}
 
+	if (input.startupNotes?.length) {
+		lines.push("- startup diagnostics:", ...input.startupNotes.map((note) => `- ${note}`));
+	}
+
 	lines.push(
 		`- session key: ${input.sessionKey}`,
-		`- state file: ${input.stateFile} (${input.persistent ? "persistent" : "in-memory"})`,
+		`- state file: ${input.stateFile} (${input.stateWriteFailed ? "write failed" : input.persistent ? "persistent" : "in-memory"})`,
 		`- paired chats: ${input.trusted}`,
 		`- broadcast targets: ${input.conversations}`,
 		`- pending codes: ${input.pending}`,
@@ -131,6 +137,6 @@ export function formatDoctorReport(input: DoctorReportInput): DoctorReport {
 		"4. no other pi process holds the same bot credential",
 	);
 
-	const healthy = !input.transports.some((entry) => entry.status === "error");
+	const healthy = !input.stateWriteFailed && !input.transports.some((entry) => entry.status === "error");
 	return { text: lines.join("\n"), healthy };
 }

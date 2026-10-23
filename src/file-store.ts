@@ -175,6 +175,8 @@ export interface FileBridgeStoreOptions {
 	readonly path: string;
 	readonly sessionId: string;
 	readonly logger?: Logger;
+	/** Emitted only when durable writes change from healthy to failed or back. */
+	readonly onPersistenceChange?: (healthy: boolean) => void;
 	/** Older sessions beyond this count are pruned on write. */
 	readonly maxSessions?: number;
 	/** Injected for determinism in tests. */
@@ -209,6 +211,8 @@ export class FileBridgeStore implements BridgeStore {
 	private readonly logger: Logger;
 	private readonly maxSessions: number;
 	private readonly now: () => number;
+	private readonly onPersistenceChange: ((healthy: boolean) => void) | undefined;
+	private failedWrite = false;
 
 	private readonly all: Record<string, SessionState>;
 	/** Makes this instance's temp file unique, even against a sibling in-process store. */
@@ -222,6 +226,7 @@ export class FileBridgeStore implements BridgeStore {
 		this.logger = options.logger ?? noopLogger;
 		this.maxSessions = options.maxSessions ?? DEFAULT_MAX_SESSIONS;
 		this.now = options.now ?? Date.now;
+		this.onPersistenceChange = options.onPersistenceChange;
 		this.all = all;
 	}
 
@@ -253,6 +258,10 @@ export class FileBridgeStore implements BridgeStore {
 		return store;
 	}
 
+	get writeFailed(): boolean {
+		return this.failedWrite;
+	}
+
 	/** Waits until every scheduled write has landed. Call on shutdown. */
 	async flush(): Promise<void> {
 		await this.queue;
@@ -279,9 +288,17 @@ export class FileBridgeStore implements BridgeStore {
 				if (!this.dirty) return;
 				this.dirty = false;
 				await this.writeOnce();
+				if (this.failedWrite) {
+					this.failedWrite = false;
+					this.onPersistenceChange?.(true);
+				}
 			})
 			.catch((error: unknown) => {
 				this.logger.error("failed to persist bridge state", { error: String(error) });
+				if (!this.failedWrite) {
+					this.failedWrite = true;
+					this.onPersistenceChange?.(false);
+				}
 			});
 	}
 

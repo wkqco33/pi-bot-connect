@@ -114,6 +114,22 @@ describe("TelegramTransport — startup", () => {
 });
 
 describe("TelegramTransport — polling", () => {
+	it("reports three consecutive poll failures and clears health after a successful poll", async () => {
+		const h = setup();
+		const original = h.rest.getUpdates.bind(h.rest);
+		let failures = 0;
+		h.rest.getUpdates = (offset, timeout, signal) => {
+			if (timeout !== 0 && failures++ < 3) return Promise.reject(new Error("temporary network error"));
+			return original(offset, timeout, signal);
+		};
+		const states: string[] = [];
+		await h.transport.start(() => undefined, (status) => states.push(status));
+		await flush();
+		h.rest.emitUpdates([]);
+		await flush();
+		expect(states).toEqual(["error", "running"]);
+	});
+
 	it("delivers a normalized private message to the handler", async () => {
 		const h = setup();
 		await startReady(h);

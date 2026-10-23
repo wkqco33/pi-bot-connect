@@ -129,12 +129,14 @@ export interface TransportCapabilities {
 }
 
 export type EnvelopeHandler = (envelope: Envelope) => void | Promise<void>;
+/** Optional operational health signal; no payload or credentials cross this boundary. */
+export type TransportHealthHandler = (status: "running" | "error") => void;
 
 /** The adapter contract. Implement this to add a messenger. */
 export interface Transport {
 	readonly id: TransportId;
 	readonly capabilities: TransportCapabilities;
-	start(handler: EnvelopeHandler): Promise<void>;
+	start(handler: EnvelopeHandler, onHealthChange?: TransportHealthHandler): Promise<void>;
 	stop(): Promise<void>;
 	send(message: OutboundMessage): Promise<SendReceipt>;
 	/**

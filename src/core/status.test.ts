@@ -102,6 +102,16 @@ const doctor = {
 };
 
 describe("formatDoctorReport", () => {
+	it("reports a failed state write as unhealthy without leaking the error", () => {
+		const result = formatDoctorReport({ ...doctor, stateWriteFailed: true });
+		expect(result.healthy).toBe(false);
+		expect(result.text).toContain("write failed");
+	});
+
+	it("shows stored startup diagnostics on demand", () => {
+		expect(formatDoctorReport({ ...doctor, startupNotes: ["global config: unknown key"] }).text).toContain("- global config: unknown key");
+	});
+
 	it("reports when no transport is registered", () => {
 		expect(formatDoctorReport(doctor).text).toContain("- transports: none registered");
 	});

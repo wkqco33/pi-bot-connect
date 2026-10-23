@@ -135,11 +135,13 @@ Discord는 스레드에서 `channel_id`가 스레드 자체의 id이므로 `conv
 | I40 | Telegram 업데이트는 순수 정규화를 거치며, 봇 자신/다른 봇 메시지와 다른 봇을 향한 명령은 무시한다. | `telegram/normalize.test.ts` |
 | I41 | 모든 전송은 conformance 키트를 통과한다(시작 전 send 거부, stop 멱등, 실패 표면화, editKey 편집, 미지원 threadId 수용, 토큰 비노출). | `transport-contract.test.ts` |
 | I42 | transcript 기록은 리댁션을 거치고 `raw` 플랫폼 payload를 버린다. 재생 시 잘못된 줄은 경고와 함께 무시한다. | `transcript.test.ts`, `replay.test.ts` |
-| I43 | 다른 pi 프로세스가 보유한 자격증명은 **실패가 아니라 `standby`다.** 알림은 한 줄(≤80자) 경고이고, `diagnostics()`는 `error`가 아니라 `standby`를 보고한다. | `start-failure.test.ts`, `bridge.test.ts`, `index.test.ts` |
+| I43 | 다른 pi 프로세스가 보유한 자격증명은 **실패가 아니라 `standby`다.** 자동 알림은 없으며 푸터·`diagnostics()`만 `standby`를 보고한다. | `start-failure.test.ts`, `bridge.test.ts`, `index.test.ts` |
 | I44 | `standby` 전송은 `runningTransportIds`에 포함되지 않는다(푸터·상태 보고가 실행 중인 것처럼 표시하지 않는다). 락이 풀리면 재시도로 인수하고, 인수 시 호스트에 상태 변경을 알린다. 브리지가 멈추면 타이머가 취소되고 **진행 중이던 인수는 자격증명을 반납**한다(락 누수 금지). | `bridge.test.ts`, `index.test.ts` |
 | I45 | 시작 실패 알림은 리댁션 + 공백 정규화 + 길이 상한(160자)을 거친다. 원문 스택/URL 토큰이 TUI로 새지 않는다. | `start-failure.test.ts`, `redact.test.ts` |
 | I46 | 두 프로세스가 같은 상태 파일을 공유해도 다른 세션의 상태를 지우지 않는다(쓰기 직전 파일을 다시 읽어 더 새로운 외부 세션만 채택, 동률이면 파일이 정본). 자기 세션은 항상 메모리가 정본이다. | `file-store.test.ts` |
 | I47 | 상태 파일 쓰기는 원자적이다. temp 파일 이름은 pid + 인스턴스 id로 유일하고, 같은 프로세스의 쓰기는 경로별 큐로 직렬화한다(동시 쓰기가 JSON을 깨뜨리지 않는다). | `file-store.test.ts` |
+| I48 | 기본 실행은 확장의 콘솔 로그를 내지 않는다. 정상 대기·인수는 푸터로만 표시하고, standby 전송에는 저장된 대화로 자동 발행하지 않는다. 런타임 연결·송신 장애는 연속 실패당 한 번만 알리고, 복구 시 알림 제한을 해제한다. 상세 로그는 `PI_BOT_CONNECT_DEBUG=1`에서만 켠다. | `operator-notices.test.ts`, `bridge.test.ts`, `gateway.test.ts`, `telegram/index.test.ts` |
+| I49 | 비동기 상태 파일 쓰기가 실패하면 침묵하지 않는다. 실패 전이당 짧은 알림을 보내고 `/connect doctor`를 unhealthy로 표시하며, 이후 성공하면 실패 상태를 해제한다. 오류 원문은 알림에 넣지 않는다. | `file-store.test.ts`, `index.test.ts`, `status.test.ts` |
 
 ---
 
@@ -307,15 +309,15 @@ const decision = decidePairing({ ..., now: 10, random: digitSequence("987654") }
 
 | 상황 | 이전 | 지금 |
 | --- | --- | --- |
-| 두 번째 pi 시작 | `discord failed to start: another pi process already holds this Discord bot (pid 86946 on gram15 (held for 0m)); Discord allows only one gateway session per bot token` (165자, error) | `discord: standby — pid 86946 on gram15 owns this bot` (52자, warning) |
+| 두 번째 pi 시작 | `discord failed to start: another pi process already holds this Discord bot (pid 86946 on gram15 (held for 0m)); Discord allows only one gateway session per bot token` (165자, error) | 자동 알림·콘솔 출력 없음 (푸터에만 standby) |
 | 푸터 상태 | `bot-connect: discord` (실행 중인 것처럼) | `bot-connect: standby (discord)` |
 | `/connect doctor` | `error` | `standby` + `retrying every 15s` (healthy 판정은 그대로) |
-| 다른 프로세스가 종료 | 다시 시작할 때까지 원격 제어 불가 | 최대 15초 안에 자동 인수(`discord: took over from the previous pi process`) |
+| 다른 프로세스가 종료 | 다시 시작할 때까지 원격 제어 불가 | 최대 15초 안에 자동 인수(푸터 갱신, 자동 알림 없음) |
 
 동작 규칙:
 
 - 인수 재시도는 **락 보유(`standby`)에만** 적용된다. 잘못된 토큰 같은 오류는 재시도하지 않는다(같은 실패를 반복할 뿐이다).
-- 재시도 중에는 알림을 다시 보내지 않는다. 소음이 목적이 아니다.
+- 대기·인수는 알림을 보내지 않고, 대기 전송에는 자동 진행 카드나 답변을 보내지 않는다. 연결 장애(Discord 재연결 예산 소진, Telegram 폴링 연속 3회 실패)나 송신 장애는 실패 구간당 한 번만 짧게 알린다. 성공적으로 복구되면 다음 장애를 다시 알릴 수 있다. 비동기 상태 저장 실패도 한 번 알리고 doctor에 표시한다.
 - 실패한 재시도는 계속 standby로 남고, 인수에 성공하면 상태가 `running`으로 바뀌며 푸터가 갱신된다 (`host.onTransportStateChange`).
 - 상태 파일은 프로세스끼리 공유된다. 쓰기 직전에 파일을 다시 읽어 **다른 세션**의 더 새로운 상태만 채택하므로, 두 번째 프로세스의 쓰기가 첫 번째의 페어링을 지우지 않는다 (I46).
 

@@ -268,6 +268,17 @@ describe("DiscordGateway — resume and reconnect", () => {
 });
 
 describe("DiscordGateway — failure and shutdown", () => {
+	it("reports a fatal post-ready failure to the health hook once", async () => {
+		const states: string[] = [];
+		const h = setup({ hooks: { onDispatch() {}, log: noopLogger, onHealthChange: (status) => states.push(status) } });
+		const started = h.gateway.start();
+		await flush();
+		h.sockets[0]?.emit(readyFrame());
+		await started;
+		h.sockets[0]?.emitClose(4004, "bad token");
+		expect(states).toEqual(["error"]);
+	});
+
 	it("treats an authentication close as fatal", async () => {
 		const h = setup();
 		const started = h.gateway.start();

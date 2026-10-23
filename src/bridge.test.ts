@@ -970,6 +970,7 @@ describe("Bridge — multi-instance standby", () => {
 		/** When set, a successful start waits for it (to model a slow takeover). */
 		gate: Promise<void> | null = null;
 		stopCalls = 0;
+		sendCalls = 0;
 
 		async start(): Promise<void> {
 			this.attempts++;
@@ -990,6 +991,7 @@ describe("Bridge — multi-instance standby", () => {
 		}
 
 		send(): Promise<SendReceipt> {
+			this.sendCalls++;
 			return Promise.resolve({ messageId: "1" });
 		}
 	}
@@ -1031,22 +1033,27 @@ describe("Bridge — multi-instance standby", () => {
 	}
 
 	it("calls a held credential standby instead of a start failure", async () => {
-		const { host } = await setupRetry();
-		expect(host.notifications.join("\n")).toContain(
-			"discord: standby — pid 86946 on gram15 owns this bot",
-		);
+		const { bridge } = await setupRetry();
+		expect(bridge.diagnostics()[0]?.status).toBe("standby");
 	});
 
-	it("does not shout: a held credential is a warning, not an error", async () => {
+	it("keeps a held credential out of the notification area", async () => {
 		const { host } = await setupRetry();
-		expect(host.notificationLevels).toEqual(["warning"]);
+		expect(host.notificationLevels).toEqual([]);
 	});
 
-	it("keeps the standby notice to one short line", async () => {
+	it("does not attempt automatic delivery from a standby session with saved chats", async () => {
+		const { bridge, host, transport } = await setupRetry();
+		bridge.store.rememberConversation({ transport: "discord", conversationId: "saved" });
+		await bridge.publishTurnStart();
+		await bridge.publish("reply", "finished");
+		expect(transport.sendCalls).toBe(0);
+		expect(host.notifications).toEqual([]);
+	});
+
+	it("does not notify on standby", async () => {
 		const { host } = await setupRetry();
-		const notice = host.notifications[0] ?? "";
-		expect(notice).not.toContain("\n");
-		expect(notice.length).toBeLessThanOrEqual(80);
+		expect(host.notifications).toEqual([]);
 	});
 
 	it("reports standby in diagnostics, not running", async () => {
@@ -1092,7 +1099,7 @@ describe("Bridge — multi-instance standby", () => {
 		expect(transport.started).toBe(true);
 		expect(bridge.diagnostics()).toEqual([{ id: "discord", status: "running" }]);
 		expect(bridge.runningTransportIds).toEqual(["discord"]);
-		expect(host.notifications.at(-1)).toBe("discord: took over from the previous pi process");
+		expect(host.notifications).toEqual([]);
 	});
 
 	it("tells the host so the footer stops saying standby", async () => {
@@ -1114,7 +1121,7 @@ describe("Bridge — multi-instance standby", () => {
 		expect(transport.started).toBe(true);
 	});
 
-	it("does not re-notify on every failed retry", async () => {
+	it("does not notify on failed retries", async () => {
 		const { bridge, host } = await setupRetry();
 		const before = host.notifications.length;
 		await bridge.retryStandby();
@@ -1173,5 +1180,54 @@ describe("Bridge — multi-instance standby", () => {
 		await bridge.stop();
 		await bridge.retryStandby();
 		expect(transport.started).toBe(false);
+	});
+});
+
+describe("Bridge — operator-visible failures", () => {
+	it("notifies once for a transport failure and resets after recovery", async () => {
+		const host = new FakeHost();
+		const bridge = new Bridge({ host });
+		let report: ((status: "error" | "running") => void) | undefined;
+		const transport: Transport = {
+			id: "discord", capabilities: FAKE_CAPABILITIES,
+			start(_handler, onHealthChange) { report = onHealthChange; return Promise.resolve(); },
+			stop() { return Promise.resolve(); },
+			send() { return Promise.resolve({ messageId: "1" }); },
+		};
+		await bridge.register(transport);
+		report?.("error");
+		report?.("error");
+		expect(host.notifications).toEqual(["discord: connection unavailable; run /connect doctor."]);
+		expect(bridge.diagnostics()[0]?.status).toBe("error");
+		report?.("running");
+		report?.("error");
+		expect(host.notifications).toHaveLength(2);
+		await bridge.stop();
+		report?.("error");
+		expect(host.notifications).toHaveLength(2);
+	});
+
+	it("notifies once for consecutive send failures and resets on success", async () => {
+		const host = new FakeHost();
+		const bridge = new Bridge({ host });
+		let fail = true;
+		await bridge.register({
+			id: "discord", capabilities: FAKE_CAPABILITIES,
+			start() { return Promise.resolve(); }, stop() { return Promise.resolve(); },
+			send() { return fail ? Promise.reject(new Error("secret in error")) : Promise.resolve({ messageId: "1" }); },
+		});
+		const request = { transport: "discord", conversationId: "chat", kind: "reply" as const, text: "hello" };
+		await bridge.send(request);
+		await bridge.send(request);
+		expect(host.notifications).toEqual(["discord: message delivery failed; run /connect doctor."]);
+		expect(bridge.diagnostics()[0]?.status).toBe("error");
+		expect(bridge.diagnostics()[0]?.detail).toContain("message delivery failed");
+		fail = false;
+		await bridge.send(request);
+		expect(bridge.diagnostics()[0]?.status).toBe("running");
+		fail = true;
+		await bridge.send(request);
+		expect(host.notifications).toHaveLength(2);
+		await bridge.stop();
 	});
 });

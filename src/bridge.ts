@@ -23,15 +23,14 @@ import {
 } from "./core/notices.js";
 import { isFreshChallenge, pairingCodeNotice, pairingPrompt, pairingSuccessPrompt, type PendingChallenge } from "./core/pairing.js";
 import { thinkingLabel } from "./core/progress.js";
+import { OperatorNotices } from "./core/operator-notices.js";
 import { takeToken, type RateLimitBucket, type RateLimitPolicy } from "./core/rate-limit.js";
 import { redactWithReport } from "./core/redact.js";
 import { route, type UnsupportedFeature } from "./core/router.js";
 import {
 	classifyStartFailure,
 	standbyDetail,
-	standbyNotice,
 	startFailureNotice,
-	takeoverNotice,
 	type LockHolder,
 } from "./core/start-failure.js";
 import {
@@ -206,6 +205,8 @@ export class Bridge {
 	private readonly host: BridgeHost;
 	private readonly transports = new Map<TransportId, Transport>();
 	private readonly startErrors = new Map<TransportId, string>();
+	private readonly healthErrors = new Set<TransportId>();
+	private readonly operatorNotices = new OperatorNotices();
 	/**
 	 * Transports whose credential another pi process legitimately holds. Not an
 	 * error: this session takes the bot over when that process lets go.
@@ -257,7 +258,7 @@ export class Bridge {
 	 */
 	private async startTransport(transport: Transport, options: { quiet?: boolean } = {}): Promise<boolean> {
 		try {
-			await transport.start((envelope) => this.onEnvelope(envelope));
+			await transport.start((envelope) => this.onEnvelope(envelope), (status) => this.onTransportHealth(transport.id, status));
 			this.startErrors.delete(transport.id);
 			this.standby.delete(transport.id);
 			this.host.logger.info("transport started", { transport: transport.id });
@@ -277,7 +278,6 @@ export class Bridge {
 					transport: transport.id,
 					holderPid: failure.holder?.pid,
 				});
-				this.host.notify(standbyNotice(transport.id, failure.holder), "warning");
 				return false;
 			}
 
@@ -310,13 +310,32 @@ export class Bridge {
 				await this.stopTransport(transport);
 				return;
 			}
-			if (started) this.host.notify(takeoverNotice(id), "info");
 			// Either the credential is ours now or starting it failed for another
 			// reason; both mean the footer must stop saying standby.
 			if (started || this.startErrors.has(id)) this.host.onTransportStateChange?.(id);
 		}
 
 		this.scheduleStandbyRetry();
+	}
+
+	private onTransportHealth(id: TransportId, status: "running" | "error"): void {
+		if (this.stopped || !this.transports.has(id)) return;
+		if (status === "running") {
+			if (!this.healthErrors.delete(id)) return;
+			this.operatorNotices.recover(id, "connection");
+		} else {
+			this.healthErrors.add(id);
+			if (this.operatorNotices.fail(id, "connection")) {
+				this.host.notify(`${id}: connection unavailable; run /connect doctor.`, "warning");
+			}
+		}
+		this.host.onTransportStateChange?.(id);
+	}
+
+	private noticeDeliveryFailure(id: TransportId): void {
+		if (this.stopped || !this.operatorNotices.fail(id, "delivery")) return;
+		this.host.notify(`${id}: message delivery failed; run /connect doctor.`, "warning");
+		this.host.onTransportStateChange?.(id);
 	}
 
 	private scheduleStandbyRetry(): void {
@@ -337,6 +356,8 @@ export class Bridge {
 			await this.stopTransport(transport);
 		}
 		this.transports.clear();
+		this.healthErrors.clear();
+		this.operatorNotices.clear();
 	}
 
 	/**
@@ -362,11 +383,14 @@ export class Bridge {
 				return { id: transport.id, status: "standby", detail: standbyDetail(holder, this.standbyRetryMs) };
 			}
 			const error = this.startErrors.get(transport.id);
-			const detail = error ?? transport.diagnose?.();
+			const healthError = this.healthErrors.has(transport.id);
+			const sendError = this.operatorNotices.failed(transport.id, "delivery");
+			const detail = error ?? (healthError ? "connection unavailable" : transport.diagnose?.());
+			const fullDetail = sendError ? `${detail === undefined ? "" : `${detail}; `}message delivery failed` : detail;
 			return {
 				id: transport.id,
-				status: error !== undefined ? "error" : "running",
-				...(detail === undefined ? {} : { detail }),
+				status: error !== undefined || healthError || sendError ? "error" : "running",
+				...(fullDetail === undefined ? {} : { detail: fullDetail }),
 			};
 		});
 	}
@@ -645,7 +669,12 @@ export class Bridge {
 	/** Sends text to one conversation, rendering and chunking for that transport. */
 	async send(request: SendRequest): Promise<SendReceipt | null> {
 		try {
-			return await this.deliver(request);
+			const receipt = await this.deliver(request);
+			if (receipt !== null && this.operatorNotices.failed(request.transport, "delivery")) {
+				this.operatorNotices.recover(request.transport, "delivery");
+				this.host.onTransportStateChange?.(request.transport);
+			}
+			return receipt;
 		} catch (error) {
 			// Outbound failure is isolated here: one rejected message (rate limit after
 			// retries, 5xx, deleted channel) must not abort the turn or the broadcast.
@@ -654,6 +683,7 @@ export class Bridge {
 				kind: request.kind,
 				error: error instanceof Error ? error.message : String(error),
 			});
+			this.noticeDeliveryFailure(request.transport);
 			return null;
 		}
 	}
@@ -663,6 +693,7 @@ export class Bridge {
 		const transport = this.transports.get(request.transport);
 		if (!transport) {
 			this.host.logger.warn("cannot send: transport not registered", { transport: request.transport });
+			this.noticeDeliveryFailure(request.transport);
 			return null;
 		}
 
@@ -759,7 +790,7 @@ export class Bridge {
 			const key = `${target.transport}:${target.conversationId}`;
 			if (this.store.isPaused(key)) continue;
 			const transport = this.transports.get(target.transport);
-			if (!transport) continue;
+			if (!transport || this.standby.has(target.transport) || this.startErrors.has(target.transport)) continue;
 			await this.notifyTyping(target);
 			if (await this.sendProgress(target, transport, text)) delivered++;
 		}
@@ -788,6 +819,10 @@ export class Bridge {
 		if (editKey !== undefined && transport.capabilities.edit) {
 			try {
 				await this.deliver({ ...target, kind: "progress", text, editKey });
+				if (this.operatorNotices.failed(target.transport, "delivery")) {
+					this.operatorNotices.recover(target.transport, "delivery");
+					this.host.onTransportStateChange?.(target.transport);
+				}
 				return true;
 			} catch (error) {
 				// The message may have been deleted, or the edit may be rate limited.
@@ -811,7 +846,7 @@ export class Bridge {
 		for (const target of this.store.listConversations()) {
 			const key = `${target.transport}:${target.conversationId}`;
 			if (this.store.isPaused(key)) continue;
-			if (!this.transports.has(target.transport)) continue;
+			if (!this.transports.has(target.transport) || this.standby.has(target.transport) || this.startErrors.has(target.transport)) continue;
 			if ((await this.send({ ...target, kind, text })) !== null) delivered++;
 		}
 		return delivered;

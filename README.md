@@ -334,11 +334,7 @@ Discord REST      ◄── chunk+markdown+redact ◄──────┘
 
 Discord는 봇 토큰당 게이트웨이 세션을 하나만 허용하고, Telegram은 같은 토큰으로 두 프로세스가 `getUpdates`를 호출하면 409를 반환하며, RoboClaw는 포트를 하나만 쓸 수 있다. 그래서 **자격증명(봇 ID 또는 포트) 기준 단일 인스턴스 락**을 건다.
 
-두 번째 프로세스는 실패가 아니라 **standby**가 된다:
-
-```text
-[bot-connect] discord: standby — pid 86946 on gram15 owns this bot    # 짧은 경고 한 줄
-```
+두 번째 프로세스는 실패가 아니라 **standby**가 된다. 정상적인 대기와 자동 인수는 입력창 위에 알림이나 콘솔 로그를 쌓지 않고 푸터에 표시한다.
 
 | 위치 | 표시 |
 | --- | --- |
@@ -346,7 +342,7 @@ Discord는 봇 토큰당 게이트웨이 세션을 하나만 허용하고, Teleg
 | `/connect status` | `- transports: discord (standby — pid 86946 on gram15 owns this bot; retrying every 15s)` |
 | `/connect doctor` | `- discord: standby — ...` (정상 상태로 취급) |
 
-먼저 띄운 프로세스를 종료하면 나머지 세션이 **최대 15초 안에 자동으로 인수**한다 (`discord: took over from the previous pi process`). 락을 실제로 보유한 프로세스가 없는데도 막혀 보이면 `/connect doctor`의 락 상태와 `~/.pi/agent/locks/`를 확인한다.
+먼저 띄운 프로세스를 종료하면 나머지 세션이 **최대 15초 안에 자동으로 인수**한다. 대기 세션은 저장된 대화에도 진행 카드·답변을 자동 전송하지 않는다. 연결·송신·상태 저장이 실패하면 실패 구간당 짧은 알림을 한 번 표시하고 `/connect doctor`에서 진단할 수 있다. 락을 실제로 보유한 프로세스가 없는데도 막혀 보이면 `/connect doctor`의 락 상태와 `~/.pi/agent/locks/`를 확인한다.
 
 ---
 
@@ -369,7 +365,7 @@ PI_BOT_CONNECT_DEBUG=1 pi -e ./src/index.ts
 | --- | --- |
 | `PI_DISCORD_TOKEN` | Discord 봇 토큰 (설정으로 이름 변경 가능) |
 | `PI_TELEGRAM_TOKEN` | Telegram 봇 토큰 (설정으로 이름 변경 가능) |
-| `PI_BOT_CONNECT_DEBUG` | `1`이면 어댑터 로그 활성화 |
+| `PI_BOT_CONNECT_DEBUG` | 기본 콘솔 로그 없음. `1`/`true`이면 상세 어댑터 로그 활성화 (`warn`/`error` 포함) |
 | `PI_BOT_CONNECT_CONFIG` | 설정 파일 경로 강제 (테스트/CI용) |
 | `PI_BOT_CONNECT_STATE` | 상태 파일 경로 강제 (테스트/CI용) |
 
