@@ -153,6 +153,23 @@ describe("DiscordTransport — startup", () => {
 		expect(h.sockets).toHaveLength(0);
 	});
 
+	it("skips re-identifying the bot on subsequent standby retries", async () => {
+		const held = await acquireLock({ path: join(dir, "discord-bot-1.lock"), pid: process.pid });
+		expect(held.ok).toBe(true);
+
+		const h = setup();
+		let identityCalls = 0;
+		const originalGetBotIdentity = h.rest.getBotIdentity.bind(h.rest);
+		h.rest.getBotIdentity = () => {
+			identityCalls++;
+			return originalGetBotIdentity();
+		};
+
+		await expect(h.transport.start(() => {})).rejects.toBeInstanceOf(LockHeldError);
+		await expect(h.transport.start(() => {})).rejects.toBeInstanceOf(LockHeldError);
+		expect(identityCalls).toBe(1);
+	});
+
 	it("releases the lock when the gateway never becomes ready", async () => {
 		const h = setup();
 		const started = h.transport.start(() => {});

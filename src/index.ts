@@ -233,6 +233,7 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 
 	let bridge: Bridge | null = null;
 	let store: FileBridgeStore | null = null;
+	let publishQueue: Promise<void> = Promise.resolve();
 	let currentSessionKey = "ephemeral";
 	let startupNotes: string[] = [];
 	let sessionCtx: ExtensionContext | null = null;
@@ -293,6 +294,15 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 		random: () => Math.random(),
 		logger,
 	};
+
+	/** Serializes outbound progress/reply sends off the agent's critical path. */
+	function enqueuePublish(task: () => Promise<void>): Promise<void> {
+		const next = publishQueue.then(task, task).catch((error: unknown) => {
+			logger.debug("background publish failed", { error: String(error) });
+		});
+		publishQueue = next;
+		return next;
+	}
 
 	/** Transport state in the shape `core/status.ts` renders. */
 	function transportStatusEntries(): TransportStatusEntry[] {
@@ -507,6 +517,7 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 
 	pi.on("session_start", async (_event, ctx) => {
 		sessionCtx = ctx;
+		publishQueue = Promise.resolve();
 		const loaded = await loadBridgeConfig(ctx.cwd);
 		const created = createTransports({
 			transportConfig: loaded.transports,
@@ -548,6 +559,7 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 	pi.on("session_shutdown", async () => {
 		await bridge?.stop();
 		bridge = null;
+		await publishQueue;
 		// Persist before the session runtime goes away, so a reload or restart
 		// does not force the user to pair again.
 		if (store) {
@@ -581,8 +593,11 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 		lastAssistantText = "";
 		// A new turn gets a new progress card instead of editing the last one, and
 		// the card says what is happening while the model reasons (no tool events).
-		bridge?.beginTurn();
-		await bridge?.publishTurnStart();
+		const activeBridge = bridge;
+		activeBridge?.beginTurn();
+		void enqueuePublish(async () => {
+			await activeBridge?.publishTurnStart();
+		});
 	});
 
 	pi.on("tool_execution_start", async (event, ctx) => {
@@ -593,7 +608,10 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 		}
 		// Only the tool *name* is ever sent: arguments routinely carry paths, tokens
 		// and file contents. The bridge throttles and edits one card per turn.
-		await bridge?.publishProgress(toolStartLabel(event.toolName));
+		const activeBridge = bridge;
+		void enqueuePublish(async () => {
+			await activeBridge?.publishProgress(toolStartLabel(event.toolName));
+		});
 	});
 
 	pi.on("tool_execution_end", async (event, ctx) => {
@@ -608,7 +626,10 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 			}
 		}
 
-		await bridge?.publishProgress(toolEndLabel(event.toolName, event.isError !== true));
+		const activeBridge = bridge;
+		void enqueuePublish(async () => {
+			await activeBridge?.publishProgress(toolEndLabel(event.toolName, event.isError !== true));
+		});
 	});
 
 	pi.on("message_end", async (event, ctx) => {
@@ -651,9 +672,12 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 		ctx.ui.setStatus(COMMAND_KEY, statusLabel());
 		const text = lastAssistantText;
 		lastAssistantText = "";
-		if (!bridge || text.length === 0) return;
+		const activeBridge = bridge;
+		if (!activeBridge || text.length === 0) return;
 		// The bridge redacts, renders and splits to the transport's limit, so the
 		// full answer goes out instead of a summary truncated to fit one message.
-		await bridge.publish("reply", text);
+		await enqueuePublish(async () => {
+			await activeBridge.publish("reply", text);
+		});
 	});
 }

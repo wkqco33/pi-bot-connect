@@ -115,12 +115,16 @@ export class DiscordTransport implements Transport {
 
 		// One REST call up front: it validates the token and gives us the bot id,
 		// which is what keeps the lock path from depending on the token itself.
-		const me = await this.rest.getBotIdentity();
-		if (me.id.length === 0) throw new Error("Discord returned an empty bot id");
-		this.botId = me.id;
-		this.botUsername = me.username;
+		// Cached across standby retries so idle terminals make zero network calls.
+		if (this.botId === null) {
+			const me = await this.rest.getBotIdentity();
+			if (me.id.length === 0) throw new Error("Discord returned an empty bot id");
+			this.botId = me.id;
+			this.botUsername = me.username;
+		}
+		const botId = this.botId;
 
-		const lockPath = join(this.options.lockDir, `discord-${me.id}.lock`);
+		const lockPath = join(this.options.lockDir, `discord-${botId}.lock`);
 		const acquired = await acquireLock({
 			path: lockPath,
 			logger: this.options.logger,
@@ -145,7 +149,7 @@ export class DiscordTransport implements Transport {
 
 		try {
 			await this.gateway.start();
-			this.options.logger.info("discord transport ready", { botId: me.id, username: me.username });
+			this.options.logger.info("discord transport ready", { botId, username: this.botUsername ?? botId });
 		} catch (error) {
 			// Never keep a lock we did not earn: this transport is not running.
 			this.handler = null;

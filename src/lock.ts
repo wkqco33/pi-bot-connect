@@ -9,7 +9,7 @@
  * Design notes:
  *  - claim with `O_EXCL` so two processes cannot both win
  *  - a holder is only evicted when it is provably gone (pid dead on this host)
- *    or older than `staleMs`
+ *    or (on a foreign host where pid liveness cannot be checked) older than `staleMs`
  *  - release is token-checked, so a reclaimed lock is not deleted by its
  *    previous owner
  *
@@ -162,7 +162,9 @@ export async function acquireLock(options: AcquireOptions): Promise<AcquireResul
 		const sameHost = holder.host === host;
 		const alive = sameHost ? isAlive(holder.pid) : true;
 		const tooOld = now() - holder.startedAt >= staleMs;
-		if (alive && !tooOld) return { ok: false, reason: "held", holder };
+		// On the same host we can verify PID liveness directly; never evict a live
+		// local session just because it has been running longer than `staleMs`.
+		if (sameHost ? alive : !tooOld) return { ok: false, reason: "held", holder };
 
 		logger.warn("reclaiming stale lock file", {
 			path: options.path,

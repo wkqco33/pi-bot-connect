@@ -105,13 +105,17 @@ export class TelegramTransport implements Transport {
 		if (this.handler !== null || this.loop !== null) throw new Error("Telegram transport is already started");
 
 		// Validates the token and gives us the bot id, which keeps the lock path
-		// from depending on the token itself.
-		const me = await this.rest.getMe();
-		if (me.id.length === 0) throw new Error("Telegram returned an empty bot id");
-		this.botId = me.id;
-		this.botUsername = me.username;
+		// from depending on the token itself. Cached across standby retries so idle
+		// terminals make zero network calls while waiting for the lock.
+		if (this.botId === null) {
+			const me = await this.rest.getMe();
+			if (me.id.length === 0) throw new Error("Telegram returned an empty bot id");
+			this.botId = me.id;
+			this.botUsername = me.username;
+		}
+		const botId = this.botId;
 
-		const lockPath = join(this.options.lockDir, `telegram-${me.id}.lock`);
+		const lockPath = join(this.options.lockDir, `telegram-${botId}.lock`);
 		const acquired = await acquireLock({
 			path: lockPath,
 			logger: this.options.logger,
@@ -129,7 +133,7 @@ export class TelegramTransport implements Transport {
 			// backlog before the long-poll loop takes over.
 			const backlog = await this.rest.getUpdates(undefined, 0);
 			this.consume(backlog);
-			this.options.logger.info("telegram transport ready", { botId: me.id, username: me.username });
+			this.options.logger.info("telegram transport ready", { botId, username: this.botUsername ?? botId });
 		} catch (error) {
 			this.handler = null;
 			this.abort = null;

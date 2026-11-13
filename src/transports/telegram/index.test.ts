@@ -100,6 +100,23 @@ describe("TelegramTransport — startup", () => {
 		expect((failure as LockHeldError).holder?.pid).toBe(process.pid);
 	});
 
+	it("skips re-identifying the bot on subsequent standby retries", async () => {
+		const held = await acquireLock({ path: join(dir, "telegram-999.lock"), pid: process.pid });
+		expect(held.ok).toBe(true);
+
+		const h = setup();
+		let getMeCalls = 0;
+		const originalGetMe = h.rest.getMe.bind(h.rest);
+		h.rest.getMe = () => {
+			getMeCalls++;
+			return originalGetMe();
+		};
+
+		await expect(h.transport.start(() => {})).rejects.toBeInstanceOf(LockHeldError);
+		await expect(h.transport.start(() => {})).rejects.toBeInstanceOf(LockHeldError);
+		expect(getMeCalls).toBe(1);
+	});
+
 	it("releases the lock when the initial poll fails", async () => {
 		const h = setup();
 		h.rest.getUpdates = () => Promise.reject(new Error("getUpdates failed"));

@@ -98,10 +98,16 @@ describe("acquireLock", () => {
 		expect(await readLock(path)).toMatchObject({ pid: 200 });
 	});
 
-	it("reclaims a lock that outlived the stale window", async () => {
-		await acquireLock({ path, pid: 100, host: "h1", now: () => 0, isAlive: alive, staleMs: 1000 });
+	it("reclaims a foreign-host lock that outlived the stale window", async () => {
+		await acquireLock({ path, pid: 100, host: "other-host", now: () => 0, isAlive: alive, staleMs: 1000 });
 		const second = await acquireLock({ path, pid: 200, host: "h1", now: () => 1000, isAlive: alive, staleMs: 1000 });
 		expect(second.ok).toBe(true);
+	});
+
+	it("keeps a live lock on the same host even after the stale window", async () => {
+		await acquireLock({ path, pid: 100, host: "h1", now: () => 0, isAlive: alive, staleMs: 1000 });
+		const second = await acquireLock({ path, pid: 200, host: "h1", now: () => 1000, isAlive: alive, staleMs: 1000 });
+		expect(second.ok).toBe(false);
 	});
 
 	it("keeps a live lock on another host until it is stale", async () => {
@@ -118,8 +124,8 @@ describe("acquireLock", () => {
 		expect(second.ok).toBe(false);
 	});
 
-	it("uses a 15 minute stale window by default", async () => {
-		await acquireLock({ path, pid: 100, host: "h1", now: () => 0, isAlive: alive });
+	it("uses a 15 minute stale window by default for foreign hosts", async () => {
+		await acquireLock({ path, pid: 100, host: "other-host", now: () => 0, isAlive: alive });
 		const justInside = await acquireLock({ path, pid: 200, host: "h1", now: () => DEFAULT_STALE_MS - 1, isAlive: alive });
 		expect(justInside.ok).toBe(false);
 		const atBoundary = await acquireLock({ path, pid: 300, host: "h1", now: () => DEFAULT_STALE_MS, isAlive: alive });
@@ -156,7 +162,7 @@ describe("lock.release", () => {
 	});
 
 	it("does not delete a lock that was reclaimed by someone else", async () => {
-		const first = await acquireLock({ path, pid: 100, host: "h1", now: () => 0, isAlive: alive, staleMs: 1000 });
+		const first = await acquireLock({ path, pid: 100, host: "other-host", now: () => 0, isAlive: alive, staleMs: 1000 });
 		if (!first.ok) throw new Error("first acquisition should succeed");
 
 		const second = await acquireLock({ path, pid: 200, host: "h1", now: () => 5000, isAlive: alive, staleMs: 1000 });
