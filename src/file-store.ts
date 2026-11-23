@@ -16,9 +16,11 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { BridgeStore, ConversationTarget } from "./bridge.js";
+import { setTimeout as delay } from "node:timers/promises";
+import { targetKey, type BridgeStore, type ConversationTarget } from "./bridge.js";
 import type { PendingChallenge } from "./core/pairing.js";
 import { noopLogger, type Logger } from "./core/types.js";
+import { acquireLock } from "./lock.js";
 
 export const STORE_VERSION = 1;
 export const DEFAULT_MAX_SESSIONS = 20;
@@ -187,9 +189,8 @@ export interface FileBridgeStoreOptions {
  * One write queue per state file, shared by every store in this process.
  *
  * Two live stores (a `/reload` overlap, or a future multi-session broker) would
- * otherwise interleave read-merge-write and drop each other's sessions. Separate
- * processes cannot share this queue, so their writes stay last-writer-wins;
- * `mergeForeignSessions` is what keeps that from erasing another session.
+ * otherwise compete for the file lock within this process. The file lock
+ * serializes the full read, merge and replace across processes.
  */
 const writeQueues = new Map<string, Promise<void>>();
 
@@ -321,8 +322,9 @@ export class FileBridgeStore implements BridgeStore {
 		let raw: string;
 		try {
 			raw = await readFile(this.path, "utf8");
-		} catch {
-			return;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+			throw error;
 		}
 
 		let parsed: unknown;
@@ -343,7 +345,22 @@ export class FileBridgeStore implements BridgeStore {
 	}
 
 	private async writeOnce(): Promise<void> {
-		await enqueueWrite(this.path, () => this.writeFileAtomic());
+		await enqueueWrite(this.path, async () => {
+			const lockPath = `${this.path}.lock`;
+			for (let attempt = 0; attempt < 50; attempt++) {
+				const acquired = await acquireLock({ path: lockPath, logger: this.logger });
+				if (acquired.ok) {
+					try {
+						await this.writeFileAtomic();
+					} finally {
+						await acquired.lock.release();
+					}
+					return;
+				}
+				await delay(20);
+			}
+			throw new Error("timed out waiting to write bridge state");
+		});
 	}
 
 	private async writeFileAtomic(): Promise<void> {
@@ -427,10 +444,16 @@ export class FileBridgeStore implements BridgeStore {
 
 	rememberConversation(target: ConversationTarget): void {
 		const current = this.state().conversations;
-		const same = (a: ConversationTarget, b: ConversationTarget): boolean =>
-			a.transport === b.transport && a.conversationId === b.conversationId && (a.threadId ?? "") === (b.threadId ?? "");
-		if (current.some((entry) => same(entry, target))) return;
+		const key = targetKey(target);
+		if (current.some((entry) => targetKey(entry) === key)) return;
 		this.update({ conversations: [...current, target] });
+	}
+
+	forgetConversation(target: ConversationTarget): void {
+		const current = this.state().conversations;
+		const key = targetKey(target);
+		const remaining = current.filter((entry) => targetKey(entry) !== key);
+		if (remaining.length !== current.length) this.update({ conversations: remaining });
 	}
 
 	listConversations(): readonly ConversationTarget[] {

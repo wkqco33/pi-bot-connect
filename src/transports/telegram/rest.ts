@@ -6,6 +6,7 @@
  * Discord REST client.
  */
 
+import { setTimeout as delay } from "node:timers/promises";
 import type { TelegramBotIdentity, TelegramUpdate } from "./normalize.js";
 
 export const TELEGRAM_API_BASE = "https://api.telegram.org";
@@ -20,9 +21,9 @@ export interface TelegramApi {
 	getMe(): Promise<TelegramBotIdentity>;
 	/** `offset` acknowledges everything below it. `timeoutSeconds` drives long polling. */
 	getUpdates(offset: number | undefined, timeoutSeconds: number, signal?: AbortSignal): Promise<TelegramUpdate[]>;
-	sendMessage(chatId: string, text: string, threadId?: string): Promise<{ messageId: string }>;
-	editMessageText(chatId: string, messageId: string, text: string): Promise<void>;
-	sendChatAction(chatId: string, action: string): Promise<void>;
+	sendMessage(chatId: string, text: string, threadId?: string, signal?: AbortSignal): Promise<{ messageId: string }>;
+	editMessageText(chatId: string, messageId: string, text: string, signal?: AbortSignal): Promise<void>;
+	sendChatAction(chatId: string, action: string, signal?: AbortSignal): Promise<void>;
 	getFile(fileId: string): Promise<{ file_path: string }>;
 }
 
@@ -30,7 +31,7 @@ export interface TelegramRestOptions {
 	readonly token: string;
 	readonly apiBase?: string;
 	readonly fetchImpl?: typeof fetch;
-	readonly delayImpl?: (ms: number) => Promise<void>;
+	readonly delayImpl?: (ms: number, signal?: AbortSignal) => Promise<void>;
 	readonly maxRetries?: number;
 	readonly timeoutMs?: number;
 }
@@ -39,15 +40,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function defaultDelay(ms: number): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 export class TelegramRest implements TelegramApi {
 	private readonly token: string;
 	private readonly apiBase: string;
 	private readonly fetchImpl: typeof fetch;
-	private readonly delayImpl: (ms: number) => Promise<void>;
+	private readonly delayImpl: NonNullable<TelegramRestOptions["delayImpl"]>;
 	private readonly maxRetries: number;
 	private readonly timeoutMs: number;
 
@@ -55,7 +52,7 @@ export class TelegramRest implements TelegramApi {
 		this.token = options.token;
 		this.apiBase = options.apiBase ?? TELEGRAM_API_BASE;
 		this.fetchImpl = options.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
-		this.delayImpl = options.delayImpl ?? defaultDelay;
+		this.delayImpl = options.delayImpl ?? ((ms, signal) => delay(ms, undefined, { signal }));
 		this.maxRetries = options.maxRetries ?? 1;
 		this.timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
 	}
@@ -83,26 +80,26 @@ export class TelegramRest implements TelegramApi {
 		return Array.isArray(result) ? (result as TelegramUpdate[]) : [];
 	}
 
-	async sendMessage(chatId: string, text: string, threadId?: string): Promise<{ messageId: string }> {
+	async sendMessage(chatId: string, text: string, threadId?: string, signal?: AbortSignal): Promise<{ messageId: string }> {
 		const result = await this.request("sendMessage", {
 			chat_id: chatId,
 			text,
 			// The bridge renders CommonMark to HTML; without this Telegram shows the tags.
 			parse_mode: "HTML",
 			...(threadId === undefined ? {} : { message_thread_id: Number(threadId) }),
-		});
+		}, { signal });
 		if (!isRecord(result) || (typeof result.message_id !== "number" && typeof result.message_id !== "string")) {
 			throw new Error("Telegram sendMessage did not return a message id");
 		}
 		return { messageId: String(result.message_id) };
 	}
 
-	async editMessageText(chatId: string, messageId: string, text: string): Promise<void> {
-		await this.request("editMessageText", { chat_id: chatId, message_id: Number(messageId), text, parse_mode: "HTML" });
+	async editMessageText(chatId: string, messageId: string, text: string, signal?: AbortSignal): Promise<void> {
+		await this.request("editMessageText", { chat_id: chatId, message_id: Number(messageId), text, parse_mode: "HTML" }, { signal });
 	}
 
-	async sendChatAction(chatId: string, action: string): Promise<void> {
-		await this.request("sendChatAction", { chat_id: chatId, action });
+	async sendChatAction(chatId: string, action: string, signal?: AbortSignal): Promise<void> {
+		await this.request("sendChatAction", { chat_id: chatId, action }, { signal });
 	}
 
 	async getFile(fileId: string): Promise<{ file_path: string }> {
@@ -134,18 +131,22 @@ export class TelegramRest implements TelegramApi {
 		let lastError: Error | null = null;
 
 		for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+			options.signal?.throwIfAborted();
+			const deadline = AbortSignal.timeout(timeoutMs);
+			const signal = options.signal === undefined ? deadline : AbortSignal.any([options.signal, deadline]);
 			let response: Response;
 			try {
 				response = await this.fetchImpl(url, {
 					method: "POST",
 					headers: { "Content-Type": "application/json" },
 					body: JSON.stringify(params),
-					signal: options.signal ?? AbortSignal.timeout(timeoutMs),
+					signal,
 				});
 			} catch (error) {
-				lastError = new Error(`Telegram ${method} could not be sent: ${String(error)}`);
+				options.signal?.throwIfAborted();
+				lastError = new Error(`Telegram ${method} could not be sent: ${String(error)}`, { cause: error });
 				if (attempt < this.maxRetries) {
-					await this.delayImpl(this.retryDelayMs(attempt));
+					await this.delayImpl(this.retryDelayMs(attempt), options.signal);
 					continue;
 				}
 				throw lastError;
@@ -154,7 +155,7 @@ export class TelegramRest implements TelegramApi {
 			if (response.status === 429) {
 				lastError = new Error(`Telegram ${method} was rate limited`);
 				if (attempt < this.maxRetries) {
-					await this.delayImpl(await this.readRetryAfter(response));
+					await this.delayImpl(await this.readRetryAfter(response), options.signal);
 					continue;
 				}
 				throw lastError;
@@ -163,13 +164,14 @@ export class TelegramRest implements TelegramApi {
 			if (response.status >= 500) {
 				lastError = new Error(`Telegram ${method} failed with status ${response.status}`);
 				if (attempt < this.maxRetries) {
-					await this.delayImpl(this.retryDelayMs(attempt));
+					await this.delayImpl(this.retryDelayMs(attempt), options.signal);
 					continue;
 				}
 				throw lastError;
 			}
 
 			const body = await response.json().catch(() => null);
+			options.signal?.throwIfAborted();
 			if (!response.ok || !isRecord(body) || body.ok !== true) {
 				const description = isRecord(body) && typeof body.description === "string" ? body.description : `status ${response.status}`;
 				throw new Error(`Telegram ${method} failed: ${description}`);

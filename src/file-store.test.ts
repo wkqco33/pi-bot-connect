@@ -1,9 +1,11 @@
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createLogger, MemoryLogSink } from "./core/logger.js";
 import { FileBridgeStore, parseStoreSnapshot, STORE_VERSION } from "./file-store.js";
+import { acquireLock } from "./lock.js";
 
 let dir: string;
 let path: string;
@@ -250,6 +252,23 @@ describe("FileBridgeStore — session isolation", () => {
 		mine.setPaused("discord:c2", true);
 		await mine.flush();
 
+		const reopened = await open({ path, sessionId: "session-a" });
+		expect(reopened.isTrusted("discord:42")).toBe(true);
+	});
+
+	it("waits for another owner of the state write lock before reading and replacing the file", async () => {
+		const store = await open({ path, sessionId: "session-a" });
+		await store.flush();
+		const acquired = await acquireLock({ path: `${path}.lock` });
+		if (!acquired.ok) throw new Error("test could not acquire the state write lock");
+		store.trust("discord:42", 5);
+		try {
+			const status = await Promise.race([store.flush().then(() => "written"), delay(50, "waiting")]);
+			expect(status).toBe("waiting");
+		} finally {
+			await acquired.lock.release();
+		}
+		await store.flush();
 		const reopened = await open({ path, sessionId: "session-a" });
 		expect(reopened.isTrusted("discord:42")).toBe(true);
 	});

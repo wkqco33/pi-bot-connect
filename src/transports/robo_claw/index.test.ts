@@ -135,6 +135,7 @@ describe("RoboClawTransport", () => {
 	it("sends OutboundMessage to active connected streams", async () => {
 		await transport.start(() => {});
 		const call = serverAdapter.simulateClientConnect();
+		call.emitInbound({ sender_id: "alice", content: "hello", metadata: { room_id: "room-1" } });
 
 		const receipt = await transport.send({
 			conversationId: "room-1",
@@ -148,7 +149,40 @@ describe("RoboClawTransport", () => {
 		expect(call.written[0]?.sender_id).toBe("robot");
 	});
 
-	it("buffers outbound message if client is not yet connected and flushes on connect", async () => {
+	it("keeps the default single chat when the client omits a room id", async () => {
+		await transport.start(() => {});
+		const call = serverAdapter.simulateClientConnect();
+		call.emitInbound({ sender_id: "alice", content: "hello" });
+		await transport.send({ conversationId: "default", kind: "reply", text: "Default answer" });
+		expect(call.written.map((message) => message.content)).toEqual(["Default answer"]);
+	});
+
+	it("does not deliver a room's messages to a stream from another room", async () => {
+		await transport.start(() => {});
+		const first = serverAdapter.simulateClientConnect();
+		const second = serverAdapter.simulateClientConnect();
+		first.emitInbound({ sender_id: "alice", content: "hello", metadata: { room_id: "room-1" } });
+		second.emitInbound({ sender_id: "bob", content: "hello", metadata: { room_id: "room-2" } });
+		await transport.send({ conversationId: "room-1", kind: "reply", text: "Room 1 only" });
+		expect(first.written.map((message) => message.content)).toEqual(["Room 1 only"]);
+		expect(second.written).toEqual([]);
+	});
+
+	it("cancels a disconnected room's buffered messages and preserves other rooms", async () => {
+		await transport.start(() => {});
+		await transport.send({ conversationId: "room-1", kind: "reply", text: "Old answer" });
+		await transport.send({ conversationId: "room-2", kind: "reply", text: "Current answer" });
+		transport.cancelPendingConversation("room-1");
+		const first = serverAdapter.simulateClientConnect();
+		const second = serverAdapter.simulateClientConnect();
+		first.emitInbound({ sender_id: "alice", content: "hello", metadata: { room_id: "room-1" } });
+		second.emitInbound({ sender_id: "bob", content: "hello", metadata: { room_id: "room-2" } });
+		await Promise.resolve();
+		expect(first.written).toEqual([]);
+		expect(second.written.map((message) => message.content)).toEqual(["Current answer"]);
+	});
+
+	it("buffers outbound messages until a client announces the destination room", async () => {
 		await transport.start(() => {});
 
 		// Send before client connects
@@ -161,6 +195,9 @@ describe("RoboClawTransport", () => {
 
 		// Client connects later
 		const call = serverAdapter.simulateClientConnect();
+		expect(call.written).toEqual([]);
+		call.emitInbound({ sender_id: "alice", content: "hello", metadata: { room_id: "room-1" } });
+		await Promise.resolve();
 
 		expect(call.written.length).toBe(1);
 		expect(call.written[0]?.content).toBe("Pending message");

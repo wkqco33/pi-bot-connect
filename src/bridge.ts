@@ -24,6 +24,7 @@ import {
 import { isFreshChallenge, pairingCodeNotice, pairingPrompt, pairingSuccessPrompt, type PendingChallenge } from "./core/pairing.js";
 import { thinkingLabel } from "./core/progress.js";
 import { OperatorNotices } from "./core/operator-notices.js";
+import { OutboundQueue } from "./outbound-queue.js";
 import { takeToken, type RateLimitBucket, type RateLimitPolicy } from "./core/rate-limit.js";
 import { redactWithReport } from "./core/redact.js";
 import { route, type UnsupportedFeature } from "./core/router.js";
@@ -57,6 +58,11 @@ export interface ConversationTarget {
 	readonly threadId?: string;
 }
 
+/** Distinguishes destinations in forum-style conversations. */
+export function targetKey(target: ConversationTarget): string {
+	return JSON.stringify([target.transport, target.conversationId, target.threadId ?? ""]);
+}
+
 export interface SendRequest extends ConversationTarget {
 	readonly kind: OutboundKind;
 	readonly text: string;
@@ -87,6 +93,7 @@ export interface BridgeStore {
 	setPaused(key: string, paused: boolean): void;
 
 	rememberConversation(target: ConversationTarget): void;
+	forgetConversation(target: ConversationTarget): void;
 	listConversations(): readonly ConversationTarget[];
 }
 
@@ -139,7 +146,11 @@ export class MemoryBridgeStore implements BridgeStore {
 	}
 
 	rememberConversation(target: ConversationTarget): void {
-		this.conversations.set(`${target.transport}:${target.conversationId}:${target.threadId ?? ""}`, target);
+		this.conversations.set(targetKey(target), target);
+	}
+
+	forgetConversation(target: ConversationTarget): void {
+		this.conversations.delete(targetKey(target));
 	}
 
 	listConversations(): readonly ConversationTarget[] {
@@ -216,13 +227,12 @@ export class Bridge {
 	private readonly standbyTimer: StandbyTimer;
 	private cancelStandbyRetry: (() => void) | null = null;
 	private stopped = false;
-	/** Conversation key to the message id of the current turn's progress card. */
-	private readonly progressKeys = new Map<string, string>();
+	private readonly outbound = new OutboundQueue();
+	private progress = { turn: 0, keys: new Map<string, string>(), lastAt: Number.NEGATIVE_INFINITY };
 	/** Per-identity token buckets for remote input. */
 	private readonly rateBuckets = new Map<string, RateLimitBucket>();
 	/** Last time a rate-limit notice was sent, keyed by identity:transport. */
 	private readonly rateNoticeAt = new Map<string, number>();
-	private lastProgressAt = Number.NEGATIVE_INFINITY;
 
 	constructor(options: BridgeOptions) {
 		this.host = options.host;
@@ -350,6 +360,7 @@ export class Bridge {
 
 	async stop(): Promise<void> {
 		this.stopped = true;
+		this.outbound.cancelAll();
 		this.cancelStandbyRetry?.();
 		this.cancelStandbyRetry = null;
 		for (const transport of this.transports.values()) {
@@ -639,12 +650,28 @@ export class Bridge {
 		if (effect?.type === "abort") this.host.abort();
 		if (effect?.type === "disconnect") {
 			this.store.revoke(identity);
-			this.store.setPaused(key, false);
+			this.disconnectConversation(envelope);
 			this.store.setPending(key, undefined);
 			this.host.logger.info("revoked remote pairing", { transport: envelope.transport, identity });
 		}
 
 		await this.reply(envelope, result.text);
+	}
+
+	disconnectAll(): number {
+		const trusted = this.store.listTrusted();
+		for (const identity of trusted) this.store.revoke(identity);
+		for (const target of this.store.listConversations()) this.disconnectConversation(target);
+		for (const { key } of this.store.listPending()) this.store.setPending(key, undefined);
+		return trusted.length;
+	}
+
+	private disconnectConversation(target: ConversationTarget): void {
+		const key = targetKey(target);
+		this.outbound.cancel(key);
+		this.progress.keys.delete(key);
+		this.store.forgetConversation(target);
+		this.transports.get(target.transport)?.cancelPendingConversation?.(target.conversationId, target.threadId);
 	}
 
 	private remember(envelope: Envelope): void {
@@ -667,9 +694,9 @@ export class Bridge {
 	}
 
 	/** Sends text to one conversation, rendering and chunking for that transport. */
-	async send(request: SendRequest): Promise<SendReceipt | null> {
+	async send(request: SendRequest, isCurrent: () => boolean = () => true, signal?: AbortSignal): Promise<SendReceipt | null> {
 		try {
-			const receipt = await this.deliver(request);
+			const receipt = await this.deliver(request, isCurrent, signal);
 			if (receipt !== null && this.operatorNotices.failed(request.transport, "delivery")) {
 				this.operatorNotices.recover(request.transport, "delivery");
 				this.host.onTransportStateChange?.(request.transport);
@@ -678,6 +705,7 @@ export class Bridge {
 		} catch (error) {
 			// Outbound failure is isolated here: one rejected message (rate limit after
 			// retries, 5xx, deleted channel) must not abort the turn or the broadcast.
+			if (!isCurrent()) return null;
 			this.host.logger.warn("outbound send failed", {
 				transport: request.transport,
 				kind: request.kind,
@@ -689,7 +717,7 @@ export class Bridge {
 	}
 
 	/** The throwing primitive. Callers that need the rejection use this. */
-	private async deliver(request: SendRequest): Promise<SendReceipt | null> {
+	private async deliver(request: SendRequest, isCurrent: () => boolean, signal?: AbortSignal): Promise<SendReceipt | null> {
 		const transport = this.transports.get(request.transport);
 		if (!transport) {
 			this.host.logger.warn("cannot send: transport not registered", { transport: request.transport });
@@ -721,6 +749,7 @@ export class Bridge {
 		let first: SendReceipt | null = null;
 
 		for (const [index, chunk] of budget.chunks.entries()) {
+			if (!isCurrent()) return null;
 			const receipt = await transport.send({
 				conversationId: request.conversationId,
 				kind: request.kind,
@@ -729,11 +758,11 @@ export class Bridge {
 				// would leave the earlier chunks stale.
 				...(index === 0 && request.editKey !== undefined ? { editKey: request.editKey } : {}),
 				...(request.threadId === undefined ? {} : { threadId: request.threadId }),
-			});
+			}, signal);
 			if (first === null) first = receipt;
 		}
 
-		if (budget.dropped > 0) {
+		if (budget.dropped > 0 && isCurrent()) {
 			// Posted as its own message, without the edit handle: editing it would
 			// replace the first chunk and leave the delivered tail stale.
 			await transport.send({
@@ -741,10 +770,10 @@ export class Bridge {
 				kind: request.kind,
 				text: truncatedNotice(budget.dropped),
 				...(request.threadId === undefined ? {} : { threadId: request.threadId }),
-			});
+			}, signal);
 		}
 
-		return first;
+		return isCurrent() ? first : null;
 	}
 
 	/**
@@ -753,8 +782,7 @@ export class Bridge {
 	 * update of a turn always lands.
 	 */
 	beginTurn(): void {
-		this.progressKeys.clear();
-		this.lastProgressAt = Number.NEGATIVE_INFINITY;
+		this.progress = { turn: this.progress.turn + 1, keys: new Map(), lastAt: Number.NEGATIVE_INFINITY };
 	}
 
 	/**
@@ -766,9 +794,7 @@ export class Bridge {
 	 */
 	async publishTurnStart(): Promise<number> {
 		if (!this.config.broadcast.progress) return 0;
-		const delivered = await this.publishProgressToConversations(thinkingLabel());
-		this.lastProgressAt = Number.NEGATIVE_INFINITY;
-		return delivered;
+		return this.publishProgressToConversations(thinkingLabel());
 	}
 
 	/**
@@ -779,61 +805,66 @@ export class Bridge {
 	async publishProgress(text: string): Promise<number> {
 		if (!this.config.broadcast.progress) return 0;
 		const now = this.host.now();
-		if (now - this.lastProgressAt < this.config.progressMinIntervalMs) return 0;
-		this.lastProgressAt = now;
+		if (now - this.progress.lastAt < this.config.progressMinIntervalMs) return 0;
+		this.progress.lastAt = now;
 		return this.publishProgressToConversations(text);
 	}
 
 	private async publishProgressToConversations(text: string): Promise<number> {
-		let delivered = 0;
-		for (const target of this.store.listConversations()) {
-			const key = `${target.transport}:${target.conversationId}`;
-			if (this.store.isPaused(key)) continue;
-			const transport = this.transports.get(target.transport);
-			if (!transport || this.standby.has(target.transport) || this.startErrors.has(target.transport)) continue;
-			await this.notifyTyping(target);
-			if (await this.sendProgress(target, transport, text)) delivered++;
-		}
-		return delivered;
+		const { turn, keys } = this.progress;
+		return this.enqueueBroadcast("progress", async (target, transport, isCurrent, signal) => {
+			await this.notifyTyping(target, signal);
+			return isCurrent() && this.sendProgress(target, transport, text, keys, isCurrent, signal);
+		}, turn);
 	}
 
 	/**
 	 * Best-effort "the bot is working" hint. A transport without an indicator, or
 	 * one that rejects, must never turn a progress update into a failed turn.
 	 */
-	private async notifyTyping(target: ConversationTarget): Promise<void> {
+	private async notifyTyping(target: ConversationTarget, signal?: AbortSignal): Promise<void> {
 		const transport = this.transports.get(target.transport);
 		const typing = transport?.typing?.bind(transport);
 		if (typing === undefined) return;
 		try {
-			await typing(target.conversationId);
+			await typing(target.conversationId, signal);
 		} catch (error) {
+			if (signal?.aborted) return;
 			this.host.logger.debug("typing hint failed", { transport: target.transport, error: String(error) });
 		}
 	}
 
-	private async sendProgress(target: ConversationTarget, transport: Transport, text: string): Promise<boolean> {
-		const key = `${target.transport}:${target.conversationId}`;
-		const editKey = this.progressKeys.get(key);
+	private async sendProgress(
+		target: ConversationTarget,
+		transport: Transport,
+		text: string,
+		keys: Map<string, string>,
+		isCurrent: () => boolean,
+		signal: AbortSignal,
+	): Promise<boolean> {
+		const key = targetKey(target);
+		const editKey = keys.get(key);
 
 		if (editKey !== undefined && transport.capabilities.edit) {
 			try {
-				await this.deliver({ ...target, kind: "progress", text, editKey });
+				if (await this.deliver({ ...target, kind: "progress", text, editKey }, isCurrent, signal) === null) return false;
 				if (this.operatorNotices.failed(target.transport, "delivery")) {
 					this.operatorNotices.recover(target.transport, "delivery");
 					this.host.onTransportStateChange?.(target.transport);
 				}
 				return true;
 			} catch (error) {
+				if (signal.aborted) return false;
 				// The message may have been deleted, or the edit may be rate limited.
 				this.host.logger.debug("progress edit failed, posting a new message", { error: String(error) });
-				this.progressKeys.delete(key);
+				keys.delete(key);
 			}
 		}
 
-		const receipt = await this.send({ ...target, kind: "progress", text });
+		if (!isCurrent()) return false;
+		const receipt = await this.send({ ...target, kind: "progress", text }, isCurrent, signal);
 		if (receipt === null) return false;
-		if (receipt.editKey !== undefined) this.progressKeys.set(key, receipt.editKey);
+		if (receipt.editKey !== undefined) keys.set(key, receipt.editKey);
 		return true;
 	}
 
@@ -842,14 +873,35 @@ export class Bridge {
 		// An explicit digest is a user action and is always delivered; the turn's
 		// final answer is background noise a shared channel may want to suppress.
 		if (kind === "reply" && !this.config.broadcast.replies) return 0;
-		let delivered = 0;
+		return this.enqueueBroadcast(kind, async (target, _transport, isCurrent, signal) =>
+			(await this.send({ ...target, kind, text }, isCurrent, signal)) !== null);
+	}
+
+	private async enqueueBroadcast(
+		kind: OutboundKind,
+		run: (target: ConversationTarget, transport: Transport, isCurrent: () => boolean, signal: AbortSignal) => Promise<boolean>,
+		turn?: number,
+	): Promise<number> {
+		if (this.stopped) return 0;
+		const jobs: Promise<boolean>[] = [];
 		for (const target of this.store.listConversations()) {
 			const key = `${target.transport}:${target.conversationId}`;
-			if (this.store.isPaused(key)) continue;
-			if (!this.transports.has(target.transport) || this.standby.has(target.transport) || this.startErrors.has(target.transport)) continue;
-			if ((await this.send({ ...target, kind, text })) !== null) delivered++;
+			const transport = this.transports.get(target.transport);
+			if (!transport) continue;
+			const available = () => !this.stopped && !this.store.isPaused(key)
+				&& !this.standby.has(target.transport) && !this.startErrors.has(target.transport);
+			if (!available()) continue;
+			const result = this.outbound.push(targetKey(target), async (signal) => {
+				const isCurrent = () => !signal.aborted && available();
+				return isCurrent() && run(target, transport, isCurrent, signal);
+			}, turn);
+			if (result) jobs.push(result);
+			else if (kind !== "progress") {
+				this.host.logger.warn("outbound queue full", { transport: target.transport, kind });
+				this.noticeDeliveryFailure(target.transport);
+			}
 		}
-		return delivered;
+		return (await Promise.all(jobs)).filter(Boolean).length;
 	}
 
 	/** Plain-data view of the bridge for local commands and diagnostics. */

@@ -43,6 +43,31 @@ describe("DiscordRest — typing indicator", () => {
 });
 
 describe("DiscordRest — resilience", () => {
+	it.each([429, 503])("cancels a message retry after HTTP %i", async (status) => {
+		const canceled = new AbortController();
+		const reason = new Error("disconnected");
+		let fetches = 0;
+		let fetchSignal: AbortSignal | null | undefined;
+		let retrySignal: AbortSignal | undefined;
+		const rest = new DiscordRest({
+			token: "fixture",
+			delayImpl: (_ms: number, signal?: AbortSignal) => {
+				retrySignal = signal;
+				canceled.abort(reason);
+				return Promise.resolve();
+			},
+			fetchImpl: (_input, init) => {
+				fetchSignal = init?.signal;
+				return Promise.resolve(++fetches === 1 ? jsonResponse({ retry_after: 1 }, status) : jsonResponse({ id: "2" }));
+			},
+		});
+
+		await expect(rest.createMessage("chat", "answer", canceled.signal)).rejects.toBe(reason);
+		expect(fetchSignal?.reason).toBe(reason);
+		expect(retrySignal).toBe(canceled.signal);
+		expect(fetches).toBe(1);
+	});
+
 	it("passes an abort signal so a hung request cannot block a turn", async () => {
 		let seen: AbortSignal | null | undefined;
 		const rest = new DiscordRest({

@@ -22,10 +22,11 @@ import { formatDuration } from "./core/commands.js";
 import { buildWorkDigest } from "./core/digest.js";
 import type { DigestFileChange } from "./core/digest.js";
 import type { DigestTodo } from "./core/digest.js";
+import { createRuntimeLogger } from "./core/logger.js";
 import { extractAssistantText, extractToolText, summarize } from "./core/message.js";
 import { formatChallengeCode } from "./core/pairing.js";
 import { formatDoctorReport, formatStatusLabel, formatStatusReport, type TransportStatusEntry } from "./core/status.js";
-import { consoleLogEnabled, summarizeStartupNotes } from "./core/operator-notices.js";
+import { summarizeStartupNotes } from "./core/operator-notices.js";
 import { boundFailureMessage } from "./core/start-failure.js";
 import { formatVersionReport, parsePackageMeta, VERSION_UNAVAILABLE_NOTICE, type PackageMeta } from "./core/version.js";
 import { toolEndLabel, toolStartLabel } from "./core/progress.js";
@@ -37,7 +38,7 @@ import {
 	remoteToolDeclinedReason,
 	type RemoteToolPolicy,
 } from "./core/tool-policy.js";
-import { resolveConfig, type BridgeConfig, type Logger, type PromptImage } from "./core/types.js";
+import { resolveConfig, type BridgeConfig, type PromptImage } from "./core/types.js";
 import { parseGitBranch, parseGitNumstat, summarizeTestRun } from "./core/work.js";
 import { FileBridgeStore } from "./file-store.js";
 import { createTransports, listTransportFactories } from "./transports/index.js";
@@ -45,20 +46,7 @@ import { createTransports, listTransportFactories } from "./transports/index.js"
 const COMMAND_KEY = "bot-connect";
 const DEBUG = process.env.PI_BOT_CONNECT_DEBUG === "1" || process.env.PI_BOT_CONNECT_DEBUG === "true";
 
-const logger: Logger = {
-	debug: (message, meta) => {
-		if (consoleLogEnabled(DEBUG, "debug")) console.debug(`[${COMMAND_KEY}] ${message}`, meta ?? "");
-	},
-	info: (message, meta) => {
-		if (consoleLogEnabled(DEBUG, "info")) console.info(`[${COMMAND_KEY}] ${message}`, meta ?? "");
-	},
-	warn: (message, meta) => {
-		if (consoleLogEnabled(DEBUG, "warn")) console.warn(`[${COMMAND_KEY}] ${message}`, meta ?? "");
-	},
-	error: (message, meta) => {
-		if (consoleLogEnabled(DEBUG, "error")) console.error(`[${COMMAND_KEY}] ${message}`, meta ?? "");
-	},
-};
+const logger = createRuntimeLogger(COMMAND_KEY, { write: (line) => process.stderr.write(line) }, DEBUG);
 
 // ---------------------------------------------------------------------------
 // Config loading
@@ -233,7 +221,6 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 
 	let bridge: Bridge | null = null;
 	let store: FileBridgeStore | null = null;
-	let publishQueue: Promise<void> = Promise.resolve();
 	let currentSessionKey = "ephemeral";
 	let startupNotes: string[] = [];
 	let sessionCtx: ExtensionContext | null = null;
@@ -295,13 +282,10 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 		logger,
 	};
 
-	/** Serializes outbound progress/reply sends off the agent's critical path. */
-	function enqueuePublish(task: () => Promise<void>): Promise<void> {
-		const next = publishQueue.then(task, task).catch((error: unknown) => {
-			logger.debug("background publish failed", { error: String(error) });
+	function publishInBackground(delivery: Promise<number> | undefined): void {
+		void delivery?.catch((error: unknown) => {
+			logger.warn("background publish failed", { error: String(error) });
 		});
-		publishQueue = next;
-		return next;
 	}
 
 	/** Transport state in the shape `core/status.ts` renders. */
@@ -489,9 +473,8 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 		}
 
 		if (sub === "disconnect") {
-			const trusted = active.store.listTrusted();
-			for (const identity of trusted) active.store.revoke(identity);
-			ctx.ui.notify(`Revoked ${trusted.length} pairing(s).`, "info");
+			const count = active.disconnectAll();
+			ctx.ui.notify(`Revoked ${count} pairing(s).`, "info");
 			return;
 		}
 
@@ -517,7 +500,6 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 
 	pi.on("session_start", async (_event, ctx) => {
 		sessionCtx = ctx;
-		publishQueue = Promise.resolve();
 		const loaded = await loadBridgeConfig(ctx.cwd);
 		const created = createTransports({
 			transportConfig: loaded.transports,
@@ -559,7 +541,6 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 	pi.on("session_shutdown", async () => {
 		await bridge?.stop();
 		bridge = null;
-		await publishQueue;
 		// Persist before the session runtime goes away, so a reload or restart
 		// does not force the user to pair again.
 		if (store) {
@@ -595,9 +576,7 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 		// the card says what is happening while the model reasons (no tool events).
 		const activeBridge = bridge;
 		activeBridge?.beginTurn();
-		void enqueuePublish(async () => {
-			await activeBridge?.publishTurnStart();
-		});
+		publishInBackground(activeBridge?.publishTurnStart());
 	});
 
 	pi.on("tool_execution_start", async (event, ctx) => {
@@ -608,10 +587,7 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 		}
 		// Only the tool *name* is ever sent: arguments routinely carry paths, tokens
 		// and file contents. The bridge throttles and edits one card per turn.
-		const activeBridge = bridge;
-		void enqueuePublish(async () => {
-			await activeBridge?.publishProgress(toolStartLabel(event.toolName));
-		});
+		publishInBackground(bridge?.publishProgress(toolStartLabel(event.toolName)));
 	});
 
 	pi.on("tool_execution_end", async (event, ctx) => {
@@ -626,10 +602,7 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 			}
 		}
 
-		const activeBridge = bridge;
-		void enqueuePublish(async () => {
-			await activeBridge?.publishProgress(toolEndLabel(event.toolName, event.isError !== true));
-		});
+		publishInBackground(bridge?.publishProgress(toolEndLabel(event.toolName, event.isError !== true)));
 	});
 
 	pi.on("message_end", async (event, ctx) => {
@@ -676,8 +649,6 @@ export default async function botConnect(pi: ExtensionAPI): Promise<void> {
 		if (!activeBridge || text.length === 0) return;
 		// The bridge redacts, renders and splits to the transport's limit, so the
 		// full answer goes out instead of a summary truncated to fit one message.
-		await enqueuePublish(async () => {
-			await activeBridge.publish("reply", text);
-		});
+		publishInBackground(activeBridge.publish("reply", text));
 	});
 }

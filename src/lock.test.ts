@@ -98,6 +98,20 @@ describe("acquireLock", () => {
 		expect(await readLock(path)).toMatchObject({ pid: 200 });
 	});
 
+	it("allows only one contender to acquire a reclaimed lock", async () => {
+		await acquireLock({ path, pid: 100, host: "h1", isAlive: alive });
+		const contenders = await Promise.all(Array.from({ length: 8 }, (_, index) => acquireLock({
+			path,
+			pid: 200 + index,
+			host: "h1",
+			isAlive: (pid) => pid !== 100,
+		})));
+		const winners = contenders.filter((result) => result.ok);
+		expect(winners).toHaveLength(1);
+		expect(await readLock(path)).toMatchObject({ pid: winners[0]?.lock.info.pid });
+		await winners[0]?.lock.release();
+	});
+
 	it("reclaims a foreign-host lock that outlived the stale window", async () => {
 		await acquireLock({ path, pid: 100, host: "other-host", now: () => 0, isAlive: alive, staleMs: 1000 });
 		const second = await acquireLock({ path, pid: 200, host: "h1", now: () => 1000, isAlive: alive, staleMs: 1000 });

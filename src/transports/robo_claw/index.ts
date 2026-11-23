@@ -7,6 +7,7 @@
 
 import { join } from "node:path";
 import type {
+	Envelope,
 	EnvelopeHandler,
 	Logger,
 	OutboundMessage,
@@ -71,8 +72,8 @@ export class RoboClawTransport implements Transport {
 	private stopped = false;
 	private messageCounter = 0;
 
-	private readonly activeStreams = new Set<GrpcStreamCall>();
-	private readonly pendingOutbound: RoboClawChatMessage[] = [];
+	private readonly activeStreams = new Map<GrpcStreamCall, Set<string>>();
+	private pendingOutbound: Array<{ conversationId: string; message: RoboClawChatMessage }> = [];
 
 	constructor(options: RoboClawTransportOptions) {
 		this.port = options.port ?? DEFAULT_ROBO_CLAW_PORT;
@@ -119,6 +120,7 @@ export class RoboClawTransport implements Transport {
 	}
 
 	async stop(): Promise<void> {
+		this.handler = null;
 		if (this.stopped || !this.started) {
 			// Ensure lock is cleaned up even if start failed partially
 			if (this.lock) {
@@ -132,7 +134,7 @@ export class RoboClawTransport implements Transport {
 		this.stopped = true;
 		this.started = false;
 
-		for (const stream of this.activeStreams) {
+		for (const stream of this.activeStreams.keys()) {
 			try {
 				stream.end();
 			} catch {
@@ -163,10 +165,11 @@ export class RoboClawTransport implements Transport {
 			now: Date.now(),
 		});
 
-		if (this.activeStreams.size > 0) {
+		const streams = [...this.activeStreams].filter(([, rooms]) => rooms.has(message.conversationId));
+		if (streams.length > 0) {
 			let anySuccess = false;
 			let lastError: unknown = null;
-			for (const stream of this.activeStreams) {
+			for (const [stream] of streams) {
 				try {
 					stream.write(chatMsg);
 					anySuccess = true;
@@ -183,10 +186,14 @@ export class RoboClawTransport implements Transport {
 			if (this.pendingOutbound.length >= 50) {
 				this.pendingOutbound.shift();
 			}
-			this.pendingOutbound.push(chatMsg);
+			this.pendingOutbound.push({ conversationId: message.conversationId, message: chatMsg });
 		}
 
 		return { messageId };
+	}
+
+	cancelPendingConversation(conversationId: string): void {
+		this.pendingOutbound = this.pendingOutbound.filter((entry) => entry.conversationId !== conversationId);
 	}
 
 	diagnose(): string {
@@ -196,6 +203,7 @@ export class RoboClawTransport implements Transport {
 
 	private handleChatStream(call: GrpcStreamCall): void {
 		let authenticated = this.token === undefined;
+		const rooms = new Set<string>();
 
 		// Check initial call headers for peer token
 		if (!authenticated && this.token) {
@@ -213,7 +221,7 @@ export class RoboClawTransport implements Transport {
 		call.on("error", onStreamEnd);
 
 		if (authenticated) {
-			this.registerActiveStream(call);
+			this.activeStreams.set(call, rooms);
 		}
 
 		call.on("data", (msg: RoboClawChatMessage) => {
@@ -225,7 +233,7 @@ export class RoboClawTransport implements Transport {
 					return;
 				}
 				authenticated = true;
-				this.registerActiveStream(call);
+				this.activeStreams.set(call, rooms);
 			}
 
 			const result = normalizeInbound(msg, {
@@ -233,22 +241,30 @@ export class RoboClawTransport implements Transport {
 			});
 
 			if (result.kind === "envelope" && this.handler) {
-				void this.handler(result.envelope);
+				rooms.add(result.envelope.conversationId);
+				void this.dispatch(call, this.handler, result.envelope);
 			}
 		});
 	}
 
-	private registerActiveStream(call: GrpcStreamCall): void {
-		this.activeStreams.add(call);
+	private async dispatch(call: GrpcStreamCall, handler: EnvelopeHandler, envelope: Envelope): Promise<void> {
+		try {
+			await handler(envelope);
+			if (this.activeStreams.has(call)) this.flushRoom(call, envelope.conversationId);
+		} catch (error) {
+			this.logger.warn("RoboClaw handler failed", { error: String(error) });
+		}
+	}
 
-		// Flush any messages waiting for a connection
-		if (this.pendingOutbound.length > 0) {
-			for (const pending of this.pendingOutbound.splice(0)) {
-				try {
-					call.write(pending);
-				} catch {
-					// Drop failed flush writes
-				}
+	private flushRoom(call: GrpcStreamCall, conversationId: string): void {
+		const pending = this.pendingOutbound.filter((entry) => entry.conversationId === conversationId);
+		if (pending.length === 0) return;
+		this.cancelPendingConversation(conversationId);
+		for (const entry of pending) {
+			try {
+				call.write(entry.message);
+			} catch (error) {
+				this.logger.warn("RoboClaw buffered message failed", { error: String(error) });
 			}
 		}
 	}

@@ -7,7 +7,7 @@
  * so without this lock remote messages land in an unpredictable process.
  *
  * Design notes:
- *  - claim with `O_EXCL` so two processes cannot both win
+ *  - claim with an exclusive hard link from a complete owner file
  *  - a holder is only evicted when it is provably gone (pid dead on this host)
  *    or (on a foreign host where pid liveness cannot be checked) older than `staleMs`
  *  - release is token-checked, so a reclaimed lock is not deleted by its
@@ -16,8 +16,9 @@
  * This module is I/O and lives outside `src/core/`.
  */
 
-import { mkdir, open, readFile, unlink } from "node:fs/promises";
-import { dirname } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { link, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { hostname as osHostname } from "node:os";
 import { noopLogger, type Logger } from "./core/types.js";
 
@@ -84,10 +85,6 @@ function defaultIsAlive(pid: number): boolean {
 	}
 }
 
-function randomToken(): string {
-	return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
 function isLockInfo(value: unknown): value is LockInfo {
 	if (typeof value !== "object" || value === null) return false;
 	const record = value as Record<string, unknown>;
@@ -100,7 +97,7 @@ function isLockInfo(value: unknown): value is LockInfo {
 	);
 }
 
-async function readHolder(path: string): Promise<LockInfo | null> {
+async function readHolder(path: string): Promise<LockInfo | null | undefined> {
 	try {
 		const raw = await readFile(path, "utf8");
 		try {
@@ -109,8 +106,23 @@ async function readHolder(path: string): Promise<LockInfo | null> {
 		} catch {
 			return null;
 		}
-	} catch {
-		return null;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	}
+}
+
+/** Serializes reclamation of a particular owner so a second reaper can't unlink its successor. */
+async function reclaimLock(options: AcquireOptions, holder: LockInfo | null): Promise<boolean> {
+	const id = createHash("sha256").update(basename(options.path)).update("\0").update(holder?.token ?? "invalid").digest("hex");
+	const guard = await acquireLock({ ...options, path: join(dirname(options.path), `.pi-lock-reclaim-${id}`) });
+	if (!guard.ok) return false;
+	try {
+		const current = await readHolder(options.path);
+		if (current !== undefined && current?.token === holder?.token) await removeLockFile(options.path);
+		return true;
+	} finally {
+		await guard.lock.release();
 	}
 }
 
@@ -125,37 +137,41 @@ export async function acquireLock(options: AcquireOptions): Promise<AcquireResul
 	await mkdir(dirname(options.path), { recursive: true, mode: 0o700 });
 
 	for (let attempt = 0; attempt < 2; attempt++) {
-		const info: LockInfo = { pid, startedAt: now(), host, token: randomToken() };
+		const info: LockInfo = { pid, startedAt: now(), host, token: randomUUID() };
+		const temporary = `${options.path}.claim-${info.token}`;
 		try {
-			const handle = await open(options.path, "wx", 0o600);
-			try {
-				await handle.writeFile(`${JSON.stringify(info)}\n`, "utf8");
-				await handle.chmod(0o600);
-			} finally {
-				await handle.close();
-			}
+			await writeFile(temporary, `${JSON.stringify(info)}\n`, { flag: "wx", mode: 0o600 });
+			await link(temporary, options.path);
+			let releasing: Promise<void> | undefined;
 			return {
 				ok: true,
 				lock: {
 					path: options.path,
 					info,
-					async release(): Promise<void> {
-						const current = await readHolder(options.path);
-						if (current?.token !== info.token) return;
-						await unlink(options.path).catch(() => {});
+					release(): Promise<void> {
+						releasing ??= (async () => {
+							const current = await readHolder(options.path);
+							if (current?.token === info.token) await removeLockFile(options.path);
+						})();
+						return releasing;
 					},
 				},
 			};
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+		} finally {
+			await removeLockFile(temporary).catch((error: unknown) => {
+				logger.warn("could not clean up lock candidate", { error: String(error) });
+			});
 		}
 
 		const holder = await readHolder(options.path);
+		if (holder === undefined) continue;
 		if (holder === null) {
 			// Unreadable or corrupt: the writer crashed mid-write. Recovering is
 			// safer than blocking the user forever on a file only we create.
 			logger.warn("reclaiming unreadable lock file", { path: options.path });
-			await unlink(options.path).catch(() => {});
+			if (!(await reclaimLock(options, holder))) return { ok: false, reason: "held", holder };
 			continue;
 		}
 
@@ -172,11 +188,19 @@ export async function acquireLock(options: AcquireOptions): Promise<AcquireResul
 			sameHost,
 			tooOld,
 		});
-		await unlink(options.path).catch(() => {});
+		if (!(await reclaimLock(options, holder))) return { ok: false, reason: "held", holder };
 	}
 
 	const holder = await readHolder(options.path);
-	return { ok: false, reason: "held", holder };
+	return { ok: false, reason: "held", holder: holder ?? null };
+}
+
+async function removeLockFile(path: string): Promise<void> {
+	try {
+		await unlink(path);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+	}
 }
 
 /** Renders a held-lock explanation. Never includes the token. */

@@ -138,7 +138,9 @@ export interface Transport {
 	readonly capabilities: TransportCapabilities;
 	start(handler: EnvelopeHandler, onHealthChange?: TransportHealthHandler): Promise<void>;
 	stop(): Promise<void>;
-	send(message: OutboundMessage): Promise<SendReceipt>;
+	send(message: OutboundMessage, signal?: AbortSignal): Promise<SendReceipt>;
+	/** Cancels outbound messages still buffered by the adapter for this destination. */
+	cancelPendingConversation?(conversationId: string, threadId?: string): void;
 	/**
 	 * Resolves an inbound attachment to bytes. Required for a transport whose
 	 * `capabilities.attachments` is true and that wants images forwarded.
@@ -150,7 +152,7 @@ export interface Transport {
 	 * Best-effort: the bridge ignores failures and this is not a delivery
 	 * guarantee. Implementations should throttle themselves.
 	 */
-	typing?(conversationId: string): Promise<void>;
+	typing?(conversationId: string, signal?: AbortSignal): Promise<void>;
 	/**
 	 * Optional one-line health detail for `/connect doctor`.
 	 * MUST NOT contain credentials, tokens or message bodies.

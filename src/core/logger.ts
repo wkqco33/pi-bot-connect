@@ -1,4 +1,5 @@
-import type { LogMeta, LogMetaValue, Logger } from "./types.js";
+import { redactSecrets } from "./redact.js";
+import { noopLogger, type LogMeta, type LogMetaValue, type Logger } from "./types.js";
 
 export interface LogSink {
 	write(line: string): void;
@@ -29,6 +30,33 @@ export function createLogger(
 		info: (m, meta) => emit("info", m, meta),
 		warn: (m, meta) => emit("warn", m, meta),
 		error: (m, meta) => emit("error", m, meta),
+	};
+}
+
+const RUNTIME_FIELDS = new Set([
+	"attempt", "code", "command", "delay", "deliverAs", "holderPid",
+	"images", "intents", "kind", "mediaType", "policy", "port", "rules",
+	"sameHost", "status", "tool", "tooOld", "transport",
+]);
+
+/** Keeps provider responses, exception text, usernames and local paths out of debug output. */
+export function createRuntimeLogger(scope: string, sink: LogSink, enabled: boolean): Logger {
+	if (!enabled) return noopLogger;
+	const logger = createLogger(scope, sink, "debug");
+	const wrap = (write: Logger["debug"]): Logger["debug"] => (message, meta) => {
+		const safe: LogMeta = {};
+		for (const [key, value] of Object.entries(meta ?? {})) {
+			if (RUNTIME_FIELDS.has(key) && (value === null || typeof value !== "object")) {
+				safe[key] = typeof value === "string" ? redactSecrets(value).slice(0, 160) : value;
+			}
+		}
+		write(redactSecrets(message), Object.keys(safe).length === 0 ? undefined : safe);
+	};
+	return {
+		debug: wrap(logger.debug),
+		info: wrap(logger.info),
+		warn: wrap(logger.warn),
+		error: wrap(logger.error),
 	};
 }
 

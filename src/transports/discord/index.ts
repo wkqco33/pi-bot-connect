@@ -169,15 +169,15 @@ export class DiscordTransport implements Transport {
 		this.lock = null;
 	}
 
-	async send(message: OutboundMessage): Promise<SendReceipt> {
+	async send(message: OutboundMessage, signal?: AbortSignal): Promise<SendReceipt> {
 		if (this.handler === null) throw new Error("Discord transport is not started");
 
 		if (message.editKey !== undefined) {
-			await this.rest.editMessage(message.conversationId, message.editKey, message.text);
+			await this.rest.editMessage(message.conversationId, message.editKey, message.text, signal);
 			return { messageId: message.editKey, editKey: message.editKey };
 		}
 
-		const created = await this.rest.createMessage(message.conversationId, message.text);
+		const created = await this.rest.createMessage(message.conversationId, message.text, signal);
 		return { messageId: created.id, editKey: created.id };
 	}
 
@@ -222,13 +222,13 @@ export class DiscordTransport implements Transport {
 	 * bridge swallows failures, and repeated hints for one channel are throttled
 	 * locally so a busy turn cannot hammer the endpoint.
 	 */
-	async typing(conversationId: string): Promise<void> {
+	async typing(conversationId: string, signal?: AbortSignal): Promise<void> {
 		if (this.handler === null) return;
 		const now = this.now();
 		const last = this.typingAt.get(conversationId);
 		if (last !== undefined && now - last < this.typingMinIntervalMs) return;
 		this.typingAt.set(conversationId, now);
-		await this.rest.triggerTyping(conversationId);
+		await this.rest.triggerTyping(conversationId, signal);
 	}
 
 	/** Health detail for `/connect doctor`. Never contains the token. */

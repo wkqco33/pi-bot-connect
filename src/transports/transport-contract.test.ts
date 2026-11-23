@@ -276,6 +276,7 @@ async function roboClawTarget(): Promise<TransportContractTarget> {
 		start: async (handler) => {
 			await transport.start(handler);
 			activeCall = serverAdapter.simulateClientConnect();
+			activeCall.emitInbound({ sender_id: "user", content: "hello", metadata: { room_id: "c1" } });
 		},
 		stop: () => transport.stop(),
 		reset: () => {

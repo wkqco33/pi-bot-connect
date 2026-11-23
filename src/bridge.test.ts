@@ -288,11 +288,26 @@ describe("Bridge — commands with effects", () => {
 	});
 
 	it("revokes the pairing on disconnect", async () => {
-		const { transport, store } = await setup();
+		const { bridge, transport, store } = await setup();
 		await transport.inject({ text: "/disconnect" });
 		expect(store.isTrusted("fake:user-1")).toBe(false);
+		expect(await bridge.publishTurnStart()).toBe(0);
+		expect(await bridge.publish("reply", "private answer")).toBe(0);
+		expect(await bridge.publish("digest", "private digest")).toBe(0);
 		await transport.inject({ text: "hello again" });
 		expect(transport.lastSent?.text).toContain("not paired with a pi session");
+	});
+
+	it("disconnects a topic without removing another peer's topic", async () => {
+		const { bridge, transport, store } = await setup({}, { threads: true }, { pair: false });
+		store.trust("fake:user-1", 1);
+		store.trust("fake:user-2", 1);
+		await transport.inject({ text: "start", threadId: "1" });
+		await transport.inject({ text: "start", threadId: "2", userId: "user-2" });
+		await transport.inject({ text: "/disconnect", threadId: "1" });
+		expect(await bridge.publish("reply", "answer")).toBe(1);
+		expect(transport.lastSent?.threadId).toBe("2");
+		expect(store.isTrusted("fake:user-2")).toBe(true);
 	});
 
 	it("requests an abort", async () => {
@@ -618,6 +633,112 @@ describe("Bridge — outbound failure isolation", () => {
 });
 
 describe("Bridge — progress card", () => {
+	it("gives each topic its own progress card", async () => {
+		const { bridge, transport, store, host } = await setup({}, { edit: true, threads: true }, { pair: false });
+		store.trust("fake:user-1", 1);
+		await transport.inject({ text: "start", threadId: "1" });
+		await transport.inject({ text: "start", threadId: "2" });
+		bridge.beginTurn();
+		await bridge.publishTurnStart();
+		host.clock += 2_000;
+		await bridge.publishProgress("working");
+		expect(transport.sent.map((message) => message.threadId)).toEqual(["1", "2"]);
+		expect(transport.edits.map((message) => [message.threadId, message.editKey]))
+			.toEqual([["1", "fake-m1"], ["2", "fake-m2"]]);
+	});
+
+	it("lets a fast conversation receive replies while dropping queued work for a disconnected slow peer", async () => {
+		const { bridge, transport, store } = await setup({}, {}, { pair: false });
+		store.trust("fake:user-1", 1);
+		store.trust("fake:user-2", 1);
+		await transport.inject({ conversationId: "slow", text: "start" });
+		await transport.inject({ conversationId: "fast", userId: "user-2", text: "start" });
+		const send = transport.send.bind(transport);
+		let unblock = () => {};
+		const slow = new Promise<void>((resolve) => { unblock = resolve; });
+		transport.send = async (message) => {
+			if (message.conversationId === "slow" && message.text === "first") await slow;
+			return send(message);
+		};
+		const first = bridge.publish("reply", "first");
+		const queued = bridge.publish("reply", "queued");
+		try {
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(transport.sent.some((message) => message.conversationId === "fast" && message.text === "first")).toBe(true);
+			await transport.inject({ conversationId: "slow", text: "/disconnect" });
+		} finally {
+			unblock();
+			await Promise.all([first, queued]);
+		}
+		expect(transport.sent.some((message) => message.conversationId === "slow" && message.text === "queued")).toBe(false);
+	});
+
+	it("coalesces progress behind an active send and keeps final replies in order", async () => {
+		const { bridge, transport, host } = await setup({ progressMinIntervalMs: 0 }, { edit: true });
+		let unblock = () => {};
+		const blocked = new Promise<void>((resolve) => { unblock = resolve; });
+		const send = transport.send.bind(transport);
+		const attempted: string[] = [];
+		transport.send = async (message) => {
+			attempted.push(message.text);
+			if (message.text === "thinking…") await blocked;
+			return send(message);
+		};
+		bridge.beginTurn();
+		const start = bridge.publishTurnStart();
+		host.clock += 2_000;
+		const earlier = bridge.publishProgress("earlier");
+		host.clock += 2_000;
+		const latest = bridge.publishProgress("latest");
+		const reply = bridge.publish("reply", "final");
+		unblock();
+
+		expect(await Promise.all([start, earlier, latest, reply])).toEqual([1, 0, 1, 1]);
+		expect(attempted).toEqual(["thinking…", "latest", "final"]);
+	});
+
+	it("cancels remaining chunks when the operator disconnects during delivery", async () => {
+		const { bridge, transport } = await setup({}, { maxMessageLength: 10 });
+		const send = transport.send.bind(transport);
+		let unblock = () => {};
+		const blocked = new Promise<void>((resolve) => { unblock = resolve; });
+		transport.send = async (message) => {
+			await blocked;
+			return send(message);
+		};
+		const publish = bridge.publish("reply", "First line\nSecond line\nThird line");
+		expect(bridge.disconnectAll()).toBe(1);
+		unblock();
+
+		expect(await publish).toBe(0);
+		expect(transport.sent).toHaveLength(1);
+		expect(await bridge.publish("digest", "summary")).toBe(0);
+	});
+
+	it("aborts an active transport send without canceling the disconnect acknowledgement", async () => {
+		const { bridge, transport, host } = await setup();
+		const send = transport.send.bind(transport);
+		const signals: Array<AbortSignal | undefined> = [];
+		transport.send = async (message, signal?: AbortSignal) => {
+			signals.push(signal);
+			if (message.text === "active answer" && signal !== undefined) {
+				await new Promise<void>((_resolve, reject) => {
+					signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+				});
+			}
+			return send(message);
+		};
+
+		const published = bridge.publish("reply", "active answer");
+		await transport.inject({ text: "/disconnect" });
+
+		expect(await published).toBe(0);
+		expect(signals[0]?.aborted).toBe(true);
+		expect(signals[1]).toBeUndefined();
+		expect(transport.sent.map((message) => message.text)).toEqual(["This chat is no longer paired."]);
+		expect(host.notifications).toEqual([]);
+	});
+
 	it("posts one card and edits it afterwards", async () => {
 		const { bridge, transport, host } = await setup({}, { edit: true });
 		await transport.inject({ text: "start" });

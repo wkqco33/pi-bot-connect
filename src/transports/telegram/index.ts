@@ -7,6 +7,7 @@
  */
 
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { acquireLock, LockHeldError, type LockHandle } from "../../lock.js";
 import type {
 	Envelope,
@@ -50,7 +51,7 @@ export interface TelegramTransportOptions {
 	readonly logger: Logger;
 	readonly rest?: TelegramApi;
 	readonly fetchImpl?: typeof fetch;
-	readonly delayImpl?: (ms: number) => Promise<void>;
+	readonly delayImpl?: (ms: number, signal?: AbortSignal) => Promise<void>;
 	readonly lockStaleMs?: number;
 	/** Long-poll timeout, in seconds. */
 	readonly pollTimeoutSeconds?: number;
@@ -67,7 +68,7 @@ export class TelegramTransport implements Transport {
 	private readonly options: TelegramTransportOptions;
 	private readonly rest: TelegramApi;
 	private readonly fetchImpl: typeof fetch;
-	private readonly delayImpl: (ms: number) => Promise<void>;
+	private readonly delayImpl: NonNullable<TelegramTransportOptions["delayImpl"]>;
 	private readonly pollTimeoutSeconds: number;
 	private readonly maxAttachmentBytes: number;
 	private readonly attachmentTimeoutMs: number;
@@ -93,7 +94,7 @@ export class TelegramTransport implements Transport {
 		this.options = options;
 		this.rest = options.rest ?? new TelegramRest({ token: options.token });
 		this.fetchImpl = options.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
-		this.delayImpl = options.delayImpl ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+		this.delayImpl = options.delayImpl ?? ((ms, signal) => delay(ms, undefined, { signal }));
 		this.pollTimeoutSeconds = options.pollTimeoutSeconds ?? 25;
 		this.maxAttachmentBytes = options.maxAttachmentBytes ?? DEFAULT_MAX_ATTACHMENT_BYTES;
 		this.attachmentTimeoutMs = options.attachmentTimeoutMs ?? 20_000;
@@ -131,13 +132,13 @@ export class TelegramTransport implements Transport {
 		try {
 			// One non-blocking poll both validates connectivity and drains the
 			// backlog before the long-poll loop takes over.
-			const backlog = await this.rest.getUpdates(undefined, 0);
+			const backlog = await this.rest.getUpdates(undefined, 0, this.abort.signal);
 			this.consume(backlog);
 			this.options.logger.info("telegram transport ready", { botId, username: this.botUsername ?? botId });
 		} catch (error) {
 			this.handler = null;
 			this.abort = null;
-			await this.lock.release();
+			await this.lock?.release();
 			this.lock = null;
 			throw error;
 		}
@@ -159,15 +160,15 @@ export class TelegramTransport implements Transport {
 		this.abort = null;
 	}
 
-	async send(message: OutboundMessage): Promise<SendReceipt> {
+	async send(message: OutboundMessage, signal?: AbortSignal): Promise<SendReceipt> {
 		if (this.handler === null) throw new Error("Telegram transport is not started");
 
 		if (message.editKey !== undefined) {
-			await this.rest.editMessageText(message.conversationId, message.editKey, message.text);
+			await this.rest.editMessageText(message.conversationId, message.editKey, message.text, signal);
 			return { messageId: message.editKey, editKey: message.editKey };
 		}
 
-		const created = await this.rest.sendMessage(message.conversationId, message.text, message.threadId);
+		const created = await this.rest.sendMessage(message.conversationId, message.text, message.threadId, signal);
 		return { messageId: created.messageId, editKey: created.messageId };
 	}
 
@@ -206,13 +207,13 @@ export class TelegramTransport implements Transport {
 		return { mediaType: served.length > 0 ? served : attachment.mediaType, data: buffer.toString("base64") };
 	}
 
-	async typing(conversationId: string): Promise<void> {
+	async typing(conversationId: string, signal?: AbortSignal): Promise<void> {
 		if (this.handler === null) return;
 		const now = this.now();
 		const last = this.typingAt.get(conversationId);
 		if (last !== undefined && now - last < this.typingMinIntervalMs) return;
 		this.typingAt.set(conversationId, now);
-		await this.rest.sendChatAction(conversationId, "typing");
+		await this.rest.sendChatAction(conversationId, "typing", signal);
 	}
 
 	diagnose(): string {
@@ -250,11 +251,15 @@ export class TelegramTransport implements Transport {
 				if (this.stopped) break;
 				const message = error instanceof Error ? error.message : String(error);
 				this.error = message;
-				this.options.logger.warn("telegram poll failed", { error: message });
 				const delay = backoff[Math.min(attempt, backoff.length - 1)] ?? 20_000;
 				attempt++;
+				this.options.logger.warn("telegram poll failed", { error: message, attempt, delay });
 				if (attempt === 3) onHealthChange?.("error");
-				await this.delayImpl(delay);
+				try {
+					await this.delayImpl(delay, this.abort?.signal);
+				} catch (error) {
+					if (!this.stopped) throw error;
+				}
 			}
 		}
 	}

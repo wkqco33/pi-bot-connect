@@ -233,6 +233,8 @@ export PI_ROBO_CLAW_TOKEN="your-peer-token"
 4. **터미널에 6자리 코드가 뜬다** → 채팅창에 6자리 입력
 5. 세션 페어링이 완료되며, 메신저에서 실시간으로 pi 코딩 에이전트와 대화하고 작업을 이어갈 수 있다!
 
+재연결한 스트림은 첫 메시지의 `metadata.room_id`로 채팅방을 확인한 뒤 그 방의 대기 메시지를 받는다. `room_id`를 생략한 단일 채팅은 기본 방을 사용한다.
+
 동일 포트를 여러 세션이 점유하지 않도록 **포트 단위 단일 인스턴스 락**이 적용된다.
 
 ## 로컬 명령
@@ -245,12 +247,14 @@ export PI_ROBO_CLAW_TOKEN="your-peer-token"
 | `/connect pair` | 대기 중인 페어링 코드와 만료 시간 |
 | `/connect digest` | 작업 다이제스트를 전송. 페어링된 채팅이 없으면 로컬에 미리보기 표시 |
 | `/connect pause` / `resume` | 모든 대화에 대한 프롬프트 전달 중지/재개 |
-| `/connect disconnect` | 페어링 해제 |
+| `/connect disconnect` | 이 세션의 페어링과 발행 대상을 모두 해제 |
 | `/connect config` | 해석된 설정 출력 (비밀값 없음) |
 
 ## 원격 명령 (Discord)
 
 `/help` `/status` `/pause` `/resume` `/abort` `/whoami` `/disconnect` — 또는 `connect status`, `bot status` 처럼 워드 접두사도 인식한다.
+
+메신저에서 `/disconnect`를 실행하면 해당 사용자의 페어링과 현재 채팅 또는 토픽의 발행 대상이 해제된다.
 
 명령이 아닌 텍스트는 전부 pi 프롬프트로 전달된다. 채널에서는 봇을 멘션하거나 접두사를 붙여야 반응한다(잡담 무시).
 
@@ -365,7 +369,7 @@ PI_BOT_CONNECT_DEBUG=1 pi -e ./src/index.ts
 | --- | --- |
 | `PI_DISCORD_TOKEN` | Discord 봇 토큰 (설정으로 이름 변경 가능) |
 | `PI_TELEGRAM_TOKEN` | Telegram 봇 토큰 (설정으로 이름 변경 가능) |
-| `PI_BOT_CONNECT_DEBUG` | 기본 콘솔 로그 없음. `1`/`true`이면 상세 어댑터 로그 활성화 (`warn`/`error` 포함) |
+| `PI_BOT_CONNECT_DEBUG` | `1`/`true`이면 구조화한 진단 로그를 표준 오류에 JSON Lines로 출력 |
 | `PI_BOT_CONNECT_CONFIG` | 설정 파일 경로 강제 (테스트/CI용) |
 | `PI_BOT_CONNECT_STATE` | 상태 파일 경로 강제 (테스트/CI용) |
 
